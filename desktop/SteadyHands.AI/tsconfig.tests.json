@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "types": ["node"],
+    "outDir": ".test-build"
+  },
+  "include": [
+    "src/lib/actionExecutor.ts",
+    "src/lib/agentGraph.ts",
+    "src/lib/choiceAction.ts",
+    "src/lib/contentExtractor.ts",
+    "electron/main/config.ts",
+    "shared/**/*.ts"
+  ]
+}
