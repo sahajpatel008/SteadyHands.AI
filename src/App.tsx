@@ -65,7 +65,7 @@ export default function App() {
   const [summary, setSummary] = useState<PageSummary | null>(null);
   const [timeline, setTimeline] = useState<AgentTimelineEvent[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [goal, setGoal] = useState("Find the Form 1040-SR (Tax Return for Seniors) and get the PDF download link.");
+  const [goal, setGoal] = useState("");
   const [running, setRunning] = useState(false);
   const [finalAnswer, setFinalAnswer] = useState("");
   const mode: AgentMode = "auto";
