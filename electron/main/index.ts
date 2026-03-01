@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, session } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +35,7 @@ function createWindow() {
       nodeIntegration: false,
       webviewTag: true,
       sandbox: false,
+      webSecurity: false,
     },
     title: "SteadyHands.AI",
   });
@@ -203,6 +204,21 @@ function setupIpcHandlers() {
 }
 
 app.whenReady().then(() => {
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (permission === 'media') {
+      callback(true);
+    } else {
+      callback(false);
+    }
+  });
+
+  session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
+    if (permission === 'media') {
+      return true;
+    }
+    return false;
+  });
+
   logMain("init", "App ready");
   const config = getConfig();
   logMain("config", "Loaded", {
