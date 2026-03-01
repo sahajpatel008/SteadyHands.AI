@@ -11,14 +11,14 @@
     "test": "npm run test:build && node --test tests/*.test.cjs"
   },
   "dependencies": {
-    "@langchain/core": "^1.1.29",
+    "@langchain/core": "^0.3.40",
     "@langchain/langgraph": "^0.2.74",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "dotenv": "^16.6.1",
     "openai": "^4.77.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "zod": "^4.1.11"
+    "zod": "^3.22.4"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
