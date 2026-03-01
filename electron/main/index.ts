@@ -4,12 +4,14 @@ import https from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getConfig, getPublicConfig } from "./config";
+import { setupAgentIpcHandlers } from "./agentRunner";
 import {
   inferIntent,
   isAtCompletionPoint,
   isGoalAchieved,
   isPageRelevantToGoal,
   planAction,
+  respondConversationally,
   summarizePage,
   safetySupervisor,
   semanticInterpreter,
@@ -89,6 +91,13 @@ function setupIpcHandlers() {
     logMain("ipc", "llm:inferIntent called", { rawGoalLen: rawGoal?.length });
     const result = await inferIntent(rawGoal);
     logMain("ipc", "llm:inferIntent done");
+    return result;
+  });
+
+  ipcMain.handle("llm:respondConversationally", async (_, userMessage: string) => {
+    logMain("ipc", "llm:respondConversationally called", { userMessageLen: userMessage?.length });
+    const result = await respondConversationally(userMessage);
+    logMain("ipc", "llm:respondConversationally done");
     return result;
   });
 
@@ -276,6 +285,10 @@ app.whenReady().then(() => {
   mcpManager = new McpClientManager(config.mcpServers);
 
   setupIpcHandlers();
+  setupAgentIpcHandlers(
+    () => mainWindow?.webContents ?? null,
+    () => mcpManager,
+  );
   logMain("init", "IPC handlers registered");
 
   // Intercept new-window requests from webview (e.g. target="_blank" links)

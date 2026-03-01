@@ -124,6 +124,8 @@ const SAFETY_TTL_MS = 8000;
 const SUMMARY_TTL_MS = 8000;
 const SEMANTIC_MAX_TOKENS = 500;
 const PLAN_MAX_TOKENS = 500;
+/** Max tokens for extended reasoning before action plan (reasoning + JSON output). */
+const PLAN_REASONING_MAX_TOKENS = 2500;
 const SAFETY_MAX_TOKENS = 260;
 const SUMMARY_MAX_TOKENS = 520;
 
@@ -220,11 +222,12 @@ function extractBalancedJsonObject(text: string): string | null {
 function tryRepairTruncatedJson(text: string): string | null {
   const start = text.indexOf("{");
   if (start < 0) return null;
-  const fragment = text.slice(start);
+  let fragment = text.slice(start);
   let braceDepth = 0;
   let bracketDepth = 0;
   let inString = false;
   let escaped = false;
+  let lastCompleteEnd = -1;
   for (let i = 0; i < fragment.length; i += 1) {
     const ch = fragment[i];
     if (inString) {
@@ -238,10 +241,32 @@ function tryRepairTruncatedJson(text: string): string | null {
       continue;
     }
     if (ch === "{") braceDepth += 1;
-    if (ch === "}") braceDepth -= 1;
+    if (ch === "}") {
+      braceDepth -= 1;
+      if (braceDepth === 0) lastCompleteEnd = i + 1;
+    }
     if (ch === "[") bracketDepth += 1;
     if (ch === "]") bracketDepth -= 1;
   }
+  // If truncated inside a string, truncate back to last complete key-value and close
+  if (inString && lastCompleteEnd < 0) {
+    const patterns = ['",', "null,", "},", "],"];
+    for (const p of patterns) {
+      const idx = fragment.lastIndexOf(p);
+      if (idx >= 0) {
+        const cut = fragment.slice(0, idx + p.length - 1);
+        try {
+          const closed = cut + "}";
+          JSON.parse(closed);
+          return closed;
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+  // Remove trailing comma before closing (invalid in JSON)
+  fragment = fragment.replace(/,\s*$/, "");
   const repaired = fragment + "]".repeat(Math.max(0, bracketDepth)) + "}".repeat(Math.max(0, braceDepth));
   try {
     JSON.parse(repaired);
@@ -319,6 +344,50 @@ function buildContentParts(prompt: string): Array<{ type: "text"; text: string }
   return [{ type: "text", text: prompt }];
 }
 
+/** vLLM structured JSON schema for inferIntent. Enforces output shape and blocks extra fields. */
+const INFER_INTENT_JSON_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    prompt_type: {
+      type: "string" as const,
+      enum: ["conversational", "task"],
+      description: "conversational = chat reply; task = agent performs actions",
+    },
+    inferredGoal: { type: "string" as const, description: "Clear actionable goal" },
+    plan: { type: "string" as const, description: "Numbered step-by-step plan" },
+    planSteps: {
+      type: "array" as const,
+      items: { type: "string" as const },
+      description: "Detailed step strings",
+    },
+    completion_point: { type: "string" as const, description: "Final state when done" },
+    searchQuery: {
+      type: ["string", "null"] as const,
+      description: "Short query for first search, or null if no search needed",
+    },
+    clarifyingQuestion: { type: "string" as const, description: "Question if ambiguous" },
+    requireUserInput: {
+      type: "boolean" as const,
+      description: "True when the agent must ask the user for more info before proceeding. Set when the message is ambiguous, incomplete, or user expressed uncertainty (e.g. 'idk which', 'not sure').",
+    },
+    choices: {
+      type: "array" as const,
+      items: {
+        type: "object" as const,
+        properties: {
+          label: { type: "string" as const },
+          goal: { type: "string" as const },
+        },
+        required: ["label", "goal"],
+        additionalProperties: false,
+      },
+      description: "Alternative interpretations",
+    },
+  },
+  required: ["prompt_type", "inferredGoal", "plan", "planSteps", "completion_point"],
+  additionalProperties: false,
+};
+
 async function chatCompletion(
   model: string,
   content: Array<{ type: "text"; text: string }>,
@@ -326,18 +395,36 @@ async function chatCompletion(
     maxTokens?: number;
     temperature?: number;
     jsonMode?: boolean;
+    /** vLLM structured output: strict JSON schema. Takes precedence over jsonMode. */
+    jsonSchema?: { name: string; schema: object };
     disableThinking?: boolean;
   },
 ): Promise<string> {
+  const responseFormat = opts?.jsonSchema
+    ? {
+        type: "json_schema" as const,
+        json_schema: {
+          name: opts.jsonSchema.name,
+          strict: true,
+          schema: opts.jsonSchema.schema,
+        },
+      }
+    : opts?.jsonMode
+      ? { type: "json_object" as const }
+      : undefined;
+
+  const extraBody: Record<string, unknown> = {};
+  if (opts?.disableThinking) {
+    extraBody.chat_template_kwargs = { enable_thinking: false };
+  }
+
   const completion = await client.chat.completions.create({
     model,
     messages: [{ role: "user", content }],
     max_tokens: opts?.maxTokens,
     temperature: opts?.temperature ?? 0.1,
-    response_format: opts?.jsonMode ? { type: "json_object" } : undefined,
-    extra_body: opts?.disableThinking
-      ? { chat_template_kwargs: { enable_thinking: false } }
-      : undefined,
+    response_format: responseFormat,
+    extra_body: Object.keys(extraBody).length > 0 ? extraBody : undefined,
   });
   return completion.choices[0]?.message?.content ?? "";
 }
@@ -395,6 +482,12 @@ async function withMemo<T>(
 }
 
 const intentSchema = z.object({
+  /** "conversational" = user wants a chat reply (questions, explanations). "task" = user wants agent to perform actions (search, navigate, fill forms). */
+  prompt_type: z
+    .enum(["conversational", "task"])
+    .optional()
+    .default("task")
+    .transform((v) => (v === "conversational" ? "conversational" : "task")),
   inferredGoal: z.string(),
   plan: z.string(),
   planSteps: z
@@ -403,11 +496,19 @@ const intentSchema = z.object({
     .transform((v) => v?.filter((s) => s.trim().length > 0) ?? []),
   /** Final state the agent should achieve. Used to detect when to stop. */
   completion_point: z.string().optional(),
-  searchQuery: z.string().optional(),
+  searchQuery: z
+    .union([z.string(), z.null()])
+    .optional()
+    .transform((v) => (v == null || v === "" ? undefined : v)),
   clarifyingQuestion: z
     .union([z.string(), z.null(), z.undefined()])
     .optional()
     .transform((v) => (typeof v === "string" ? v : undefined)),
+  requireUserInput: z
+    .union([z.boolean(), z.string()])
+    .optional()
+    .default(false)
+    .transform((v) => v === true || v === "true"),
   choices: z
     .union([
       z.array(z.object({ label: z.string(), goal: z.string() })),
@@ -427,27 +528,38 @@ export async function inferIntent(rawGoal: string): Promise<InferIntentResult> {
   const prompt = `You are an intent inference system. For the user's raw message, think deeply and thoroughly about what they actually want to do.
 Resolve ambiguities, infer context, and produce a clear operational goal plus a step-by-step plan.
 
-Return ONLY a JSON object with:
+CRITICAL: Return ONLY the keys listed below. Do NOT add error, response, features, timestamp, metadata, or any other fields.
+
+Return a JSON object with EXACTLY these keys:
+- prompt_type: "conversational" or "task". Use "conversational" when the user wants a chat reply—questions, explanations, general discussion, opinions, definitions, how-to advice without doing it. Use "task" when the user wants the agent to perform actions—search the web, navigate, fill forms, click, download, book, etc.
 - inferredGoal: A clear, actionable goal statement (what the user wants to achieve)
 - plan: A numbered step-by-step plan (what to do first, second, etc.). Be specific. Include search terms, sites, or actions when inferable.
 - planSteps: Array of DETAILED step strings, one per step. Each step must be a single actionable task the agent can execute. Include the TARGET we're looking for (e.g. "Click IRS.gov link in search results", "Find and click Form 1040-SR PDF link on page", "Download PDF from form page"). Be specific about what to look for on each page.
 - completion_point: A concise description of the FINAL state when the goal is achieved. The agent stops when it reaches this state. Examples: "IRS Form 1040-SR PDF page visible or downloadable on irs.gov", "Flight search results with Tokyo as destination", "Movie showtimes or streaming options displayed". Be specific enough to detect success.
 - searchQuery: (optional) If the first step involves a web search, the SHORT query to type (e.g. "Form 1040-SR" or "IRS Form 1040-SR PDF"). Never the full goal or plan text. Max 80 chars.
 - clarifyingQuestion: (optional) If the intent is ambiguous, one short question to help the user refine (e.g. "Do you want theater showtimes, streaming recommendations, or both?")
+- requireUserInput: (boolean) Set TRUE when the agent must ask the user for more info before proceeding. Set true when: (a) the user expressed uncertainty ("idk which", "don't know", "not sure which", "any"), (b) the message is ambiguous or incomplete, (c) there are multiple valid interpretations and the user didn't specify. Set false when the goal is clear and actionable.
 - choices: (optional) Array of 0-3 alternative interpretations when ambiguous. Each: { "label": "Short button label", "goal": "Full goal for this option" }
 
 Examples:
-- "download IRS Form 1040-SR" -> inferredGoal: "Find and download IRS Form 1040-SR", plan: "1. Search for Form 1040-SR 2. Click IRS link 3. Download PDF", planSteps: ["Search for Form 1040-SR on Google", "Click IRS.gov or official tax form link in search results", "On form page: find and click Form 1040-SR PDF download link", "Download or open the PDF"], completion_point: "IRS Form 1040-SR PDF page visible or downloadable on irs.gov", searchQuery: "IRS Form 1040-SR PDF"
-- "i wanna see a movie" -> inferredGoal: "Find movie recommendations", plan: "1. Search for movie recommendations 2. Present options", completion_point: "Movie recommendations or showtimes displayed", searchQuery: "movie recommendations"
-- "book flight to tokyo" -> inferredGoal: "Book a flight to Tokyo", plan: "1. Navigate to flight search 2. Enter Tokyo 3. Select dates 4. Search", completion_point: "Flight search results with Tokyo as destination", searchQuery: "flights to Tokyo"
+- "what is IRS Form 1040-SR?" -> prompt_type: "conversational", inferredGoal: "Explain IRS Form 1040-SR", plan: "Answer the question directly"
+- "download IRS Form 1040-SR" -> prompt_type: "task", inferredGoal: "Find and download IRS Form 1040-SR", plan: "1. Search for Form 1040-SR 2. Click IRS link 3. Download PDF", planSteps: ["Search for Form 1040-SR on Google", "Click IRS.gov or official tax form link in search results", "On form page: find and click Form 1040-SR PDF download link", "Download or open the PDF"], completion_point: "IRS Form 1040-SR PDF page visible or downloadable on irs.gov", searchQuery: "IRS Form 1040-SR PDF", requireUserInput: false
+- "i wanna go to irs and download a form idk which" -> prompt_type: "task", inferredGoal: "Navigate to IRS and download a tax form (user unspecified which form)", plan: "1. Search for IRS.gov 2. Navigate to forms page 3. Ask user which form 4. Download selected form", planSteps: ["Search for IRS.gov on Google", "Click IRS.gov link in search results", "Navigate to forms page on irs.gov", "Ask user which form they need", "Download the form the user selects"], completion_point: "User has specified which form and we have navigated to it or downloaded it", searchQuery: "IRS.gov forms", clarifyingQuestion: "Which IRS form do you need? (e.g. Form 1040, 1040-SR, W-2, 1099)", requireUserInput: true
+- "i wanna see a movie" -> prompt_type: "task", inferredGoal: "Find movie recommendations", plan: "1. Search for movie recommendations 2. Present options", completion_point: "Movie recommendations or showtimes displayed", searchQuery: "movie recommendations"
+- "book flight to tokyo" -> prompt_type: "task", inferredGoal: "Book a flight to Tokyo", plan: "1. Navigate to flight search 2. Enter Tokyo 3. Select dates 4. Search", completion_point: "Flight search results with Tokyo as destination", searchQuery: "flights to Tokyo"
+
+When the user expresses uncertainty ("idk which", "don't know which", "not sure which", "any"), set requireUserInput: true and include clarifyingQuestion. The agent will ask before proceeding.
 
 User message:
 ${rawGoal}`;
 
   const content = buildContentParts(prompt);
   const text = await chatCompletion(model, content, {
-    maxTokens: 520,
-    jsonMode: true,
+    maxTokens: 1200,
+    jsonSchema: {
+      name: "infer_intent",
+      schema: INFER_INTENT_JSON_SCHEMA,
+    },
   });
   logModelResponse("inferIntent raw response", text, 400);
   const parsed = intentSchema.parse(extractJson(text));
@@ -458,12 +570,93 @@ ${rawGoal}`;
       .filter((s) => s.length > 0);
   }
   logMain("llm", "inferIntent done", {
+    prompt_type: parsed.prompt_type,
     inferredGoalLen: parsed.inferredGoal.length,
     planLen: parsed.plan.length,
     planSteps: parsed.planSteps?.length ?? 0,
+    requireUserInput: parsed.requireUserInput,
     choices: parsed.choices?.length ?? 0,
   });
   return parsed;
+}
+
+export type RefinedGoalResult = {
+  refinedGoal: string;
+  completion_point?: string;
+  planSteps?: string[];
+  searchQuery?: string;
+};
+
+/** Refine the goal, completion_point, and plan from user's clarification. Call when user answers a clarifying question. */
+export async function refineGoalFromUserInput(
+  originalGoal: string,
+  userAnswer: string,
+  question: string,
+): Promise<RefinedGoalResult> {
+  logMain("llm", "refineGoalFromUserInput start", {
+    answerLen: userAnswer.length,
+    question: question.slice(0, 60),
+  });
+  const model = config.summarizerModel;
+  const prompt = `The agent asked the user: "${question}"
+The user answered: "${userAnswer}"
+
+The original goal/plan was:
+${originalGoal.slice(0, 2000)}
+
+Update the goal, completion_point, planSteps, and searchQuery to reflect the user's clarification. The refined goal should be specific and actionable. The completion_point should describe the final state when we're done. The planSteps should be the updated step-by-step plan. The searchQuery (if a search is needed) should be the short query.
+
+Return ONLY a JSON object with these keys:
+- refinedGoal: string (the updated full goal text, including "Inferred goal:", "Plan:", "Original user message:", and "User clarification: {answer}")
+- completion_point: string (when we're done)
+- planSteps: array of strings (updated plan steps)
+- searchQuery: string or null (short search query if needed)`;
+
+  const content = buildContentParts(prompt);
+  const text = await chatCompletion(model, content, {
+    maxTokens: 800,
+    jsonMode: true,
+  });
+  logModelResponse("refineGoalFromUserInput raw", text, 400);
+  const raw = extractJson(text) as {
+    refinedGoal?: string;
+    completion_point?: string;
+    planSteps?: string[];
+    searchQuery?: string | null;
+  };
+  const result: RefinedGoalResult = {
+    refinedGoal: raw.refinedGoal ?? `${originalGoal}\n\nUser clarification: ${userAnswer}`,
+    completion_point: raw.completion_point,
+    planSteps: Array.isArray(raw.planSteps) ? raw.planSteps.filter((s) => typeof s === "string") : undefined,
+    searchQuery: typeof raw.searchQuery === "string" ? raw.searchQuery : undefined,
+  };
+  logMain("llm", "refineGoalFromUserInput done", {
+    refinedGoalLen: result.refinedGoal.length,
+    completion_point: result.completion_point?.slice(0, 60),
+    planStepsLen: result.planSteps?.length ?? 0,
+  });
+  return result;
+}
+
+/** Generate a conversational reply when the user asks a question or wants discussion (no task execution). */
+export async function respondConversationally(userMessage: string): Promise<string> {
+  logMain("llm", "respondConversationally start", { userMessageLen: userMessage.length });
+  const model = config.summarizerModel;
+  const prompt = `You are a helpful assistant. The user has asked a conversational question or wants a discussion—they do NOT want you to search the web or perform browser actions.
+
+Respond helpfully, concisely, and directly. Be informative but keep the response focused. If the question is ambiguous, you may ask a brief clarifying question.
+
+User message:
+${userMessage}`;
+
+  const content = buildContentParts(prompt);
+  const text = await chatCompletion(model, content, {
+    maxTokens: 1024,
+    temperature: 0.3,
+  });
+  const reply = stripThinkTags(text ?? "").trim();
+  logMain("llm", "respondConversationally done", { replyLen: reply.length });
+  return reply || "I'm not sure how to respond to that. Could you rephrase?";
 }
 
 /** Semantic Interpreter ("Eyes"): Raw DOM -> simplified JSON schema of top actions for user_goal */
@@ -615,6 +808,7 @@ Return STRICT JSON only:
 
 Rules:
 - approved: true only if the action clearly advances the user's goal. Reject if it could be phishing, accidental, or off-goal.
+- approved: false ALWAYS for login, sign-in, sign-up, authentication, payment, checkout, password entry, or any action requiring strict user info/intervention. The agent must stop before these—never proceed.
 - requiresHITL: true if the action involves payments, money, confirmations, account changes, or sensitive data. User must confirm before execution.
 
 User goal: ${userGoal}
@@ -764,7 +958,8 @@ You are a browser action planner. Return STRICT JSON only.
 Output ONLY a single JSON object—no think tags, no markdown, no commentary before or after.
 Pick only ONE next step per response.
 Always include confidence 0-1. If confidence < ${confidenceThreshold}, return askQuestion instead of action.
-Be concise. Reasoning should be one short sentence.
+
+EXTENDED REASONING (max 2000 tokens): Before determining the action plan, use extended thinking and reasoning. Think through the page content, options, and goal. Then verify that your reasoning is complete. If not complete, append new reasoning. Only after your reasoning is complete, output the final JSON decision.
 
 BEFORE EACH DECISION: Reference the plan queue below. Your action must achieve the CURRENT step.
 ${planQueueBlock}
@@ -774,11 +969,16 @@ CRITICAL: Do NOT return done=true until the user's goal is FULLY achieved.
 - For "book a flight SFO to MUM tomorrow": you must navigate to a flight search page (e.g. google.com/travel/flights), fill origin SFO, destination MUM/BOM, date tomorrow, click search. Only done when search results are shown or user has selected a flight.
 - One action per step. Keep going until the goal is achieved.
 
+USER UNCERTAINTY (CRITICAL): If the goal or original message indicates the user doesn't know which option (e.g. "idk which", "don't know which", "not sure which", "any"), NEVER auto-select. Return askQuestion with confidence 0.3. List the available options and ask them to choose. The current plan step may say "Ask user which form" or similar—in that case, return askQuestion.
+
+MULTIPLE SIMILAR OPTIONS: When 2+ options could fit the goal (e.g. multiple tax forms, similar links) and the user did NOT specify which one, return askQuestion. Do not guess. Use confidence below threshold.
+
 ACTION SOURCE OF TRUTH:
 - Thoroughly check the page content below before deciding. The target (e.g. form link, download button) may be in the content.
 - Prefer ONLY the numbered semantic options below.
 - If a PLAN QUEUE is provided above, pick the action that achieves the CURRENT step in the queue.
-- If options exist, return selectedChoiceIndex (1-based) for the BEST MATCHING choice—the one most relevant to the goal and current plan step.
+- If the CURRENT step says "Ask user" or "Ask which", return askQuestion—do not select.
+- If options exist and user DID specify which one, return selectedChoiceIndex (1-based) for the BEST MATCHING choice.
 - Avoid irrelevant links (ads, unrelated sites, generic navigation). Pick the option that directly advances the goal.
 - If user says "option N", pick that exact valid index when possible.
 - Return raw action only when there are zero executable semantic options.
@@ -824,10 +1024,10 @@ Only if no executable semantic options exist, return ONE raw action:
 `;
 
       const content = buildContentParts(prompt);
-      const maxTokens = config.turboMode ? PLAN_MAX_TOKENS : 360;
+      const maxTokens = PLAN_REASONING_MAX_TOKENS;
       let text = await chatCompletion(plannerModel, content, {
         maxTokens,
-        disableThinking: true,
+        disableThinking: false,
         jsonMode: true,
       });
       logModelResponse("planAction raw response", text, 900);
@@ -835,20 +1035,16 @@ Only if no executable semantic options exist, return ONE raw action:
       try {
         parsed = actionSchema.parse(extractJson(text));
       } catch (e) {
-        if (maxTokens < 512) {
-          logMain("llm", "planAction parse failed, retrying with higher max_tokens", {
-            error: String(e),
-          });
-          text = await chatCompletion(plannerModel, content, {
-            maxTokens: 512,
-            disableThinking: true,
-            jsonMode: true,
-          });
-          logModelResponse("planAction retry raw response", text, 900);
-          parsed = actionSchema.parse(extractJson(text));
-        } else {
-          throw e;
-        }
+        logMain("llm", "planAction parse failed, retrying without extended thinking", {
+          error: String(e),
+        });
+        text = await chatCompletion(plannerModel, content, {
+          maxTokens: 512,
+          disableThinking: true,
+          jsonMode: true,
+        });
+        logModelResponse("planAction retry raw response", text, 900);
+        parsed = actionSchema.parse(extractJson(text));
       }
       logMain("llm", "planAction parsed", {
         done: parsed.done,
@@ -1033,5 +1229,47 @@ Answer:`;
   const achieved = /^\s*yes\b/i.test(answer);
   logMain("llm", "isAtCompletionPoint", { url: observation.url, achieved, answerPreview: answer.slice(0, 30) });
   return achieved;
+}
+
+/** Map user's natural-language answer to a choice index (1-based) using semantic reasoning. */
+export async function resolveUserChoiceToIndex(
+  answer: string,
+  choices: SidebarChoice[],
+  question?: string,
+): Promise<number | null> {
+  const trimmed = answer.trim();
+  if (!trimmed || choices.length === 0) return null;
+
+  const choicesText = choices
+    .map((c, i) => `${i + 1}. ${c.label} — ${c.suggestedAction}`)
+    .join("\n");
+
+  const prompt = `The user was asked: "${question ?? "Which option?"}"
+
+Available options:
+${choicesText}
+
+User's response: "${trimmed}"
+
+Which option (1-${choices.length}) best matches what the user meant? Use semantic reasoning: "the first one", "search", "click continue", "I'll try the search box" etc. all map to the matching option.
+Return ONLY a JSON object: {"selectedIndex": N} where N is 1-based, or {"selectedIndex": null} if no clear match.`;
+
+  const content = buildContentParts(prompt);
+  const rawText = await chatCompletion(config.summarizerModel, content, {
+    maxTokens: 80,
+    disableThinking: true,
+  });
+  const text = stripThinkTags(rawText);
+  try {
+    const parsed = JSON.parse(text.replace(/.*?(\{[\s\S]*\}).*/, "$1"));
+    const n = parsed?.selectedIndex;
+    if (typeof n === "number" && n >= 1 && n <= choices.length) {
+      logMain("llm", "resolveUserChoiceToIndex", { answer: trimmed.slice(0, 40), selectedIndex: n });
+      return n;
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return null;
 }
 

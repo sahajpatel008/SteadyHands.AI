@@ -8,14 +8,6 @@ type ChatMessage = {
   text: string;
 };
 
-type IntentConfirmation = {
-  inferredGoal: string;
-  plan: string;
-  clarifyingQuestion?: string;
-  choices: Array<{ label: string; goal: string }>;
-  rawGoal: string;
-};
-
 type Props = {
   summary: PageSummary | null;
   timeline: AgentTimelineEvent[];
@@ -25,14 +17,6 @@ type Props = {
   onPendingQuestionInputChange: (value: string) => void;
   onSubmitPendingQuestion: () => void;
   onSkipPendingQuestion: () => void;
-  pendingIntentConfirmation: IntentConfirmation | null;
-  pendingIntentRefine: boolean;
-  onProceedIntent: () => void;
-  onRefineIntent: () => void;
-  onPickIntentChoice: (choice: { label: string; goal: string }) => void;
-  onSubmitRefine: () => void;
-  onCancelRefine: () => void;
-  onDismissIntentConfirmation: () => void;
   intentInferring: boolean;
   goal: string;
   onGoalChange: (goal: string) => void;
@@ -63,14 +47,6 @@ export function AssistantPanel({
   onPendingQuestionInputChange,
   onSubmitPendingQuestion,
   onSkipPendingQuestion,
-  pendingIntentConfirmation,
-  pendingIntentRefine,
-  onProceedIntent,
-  onRefineIntent,
-  onPickIntentChoice,
-  onSubmitRefine,
-  onCancelRefine,
-  onDismissIntentConfirmation,
   intentInferring,
   goal,
   onGoalChange,
@@ -171,7 +147,7 @@ export function AssistantPanel({
               const text = data.text;
               if (text) {
                 console.log("STT Result:", text);
-                if (pendingIntentRefine || pendingQuestion) {
+                if (pendingQuestion) {
                   const currentText = pendingQuestionInputRef.current ? pendingQuestionInputRef.current + " " : "";
                   onPendingQuestionInputChange(currentText + text);
                 } else {
@@ -225,20 +201,17 @@ export function AssistantPanel({
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       if (isRecording) { toggleRecording(); return; }
-      if (pendingIntentRefine) { onSubmitRefine(); return; }
       if (pendingQuestion) { onSubmitPendingQuestion(); return; }
-      if (!running && !intentInferring && goal.trim() && !pendingIntentConfirmation) {
+      if (!running && !intentInferring && goal.trim()) {
         onRun();
       }
     }
   };
 
-  const inputValue = pendingIntentRefine || pendingQuestion ? pendingQuestionInput : goal;
-  const onInputChange = pendingIntentRefine || pendingQuestion ? onPendingQuestionInputChange : onGoalChange;
+  const inputValue = pendingQuestion ? pendingQuestionInput : goal;
+  const onInputChange = pendingQuestion ? onPendingQuestionInputChange : onGoalChange;
 
-  const sendLabel = pendingIntentRefine
-    ? "Update"
-    : pendingQuestion
+  const sendLabel = pendingQuestion
     ? "Reply"
     : intentInferring
     ? "Thinking…"
@@ -248,16 +221,13 @@ export function AssistantPanel({
 
   const onSend = () => {
     if (isRecording) { toggleRecording(); return; }
-    if (pendingIntentRefine) { onSubmitRefine(); return; }
     if (pendingQuestion) { onSubmitPendingQuestion(); return; }
-    if (!running && !intentInferring && goal.trim() && !pendingIntentConfirmation) {
+    if (!running && !intentInferring && goal.trim()) {
       onRun();
     }
   };
 
-  const inputPlaceholder = pendingIntentRefine
-    ? "What would you like to change?"
-    : pendingQuestion
+  const inputPlaceholder = pendingQuestion
     ? pendingQuestion
     : "Find the Form 1040-SR (Tax Return for Seniors) and get the PDF download link. ";
 
@@ -340,35 +310,6 @@ export function AssistantPanel({
           </div>
         ) : null}
 
-        {/* Intent confirmation */}
-        {pendingIntentConfirmation && !pendingIntentRefine ? (
-          <div className="confirmCard">
-            <p className="confirmQuestion">Does this look right?</p>
-            <p className="confirmPlan">{pendingIntentConfirmation.inferredGoal}</p>
-            <div className="confirmActions">
-              <button className="confirmBtn confirmBtn--yes" type="button" onClick={onProceedIntent}>
-                Yes, go ahead
-              </button>
-              <button className="confirmBtn" type="button" onClick={onRefineIntent}>
-                Change it
-              </button>
-              {pendingIntentConfirmation.choices.map((c, i) => (
-                <button
-                  key={`${c.label}-${i}`}
-                  className="confirmBtn"
-                  type="button"
-                  onClick={() => onPickIntentChoice(c)}
-                >
-                  {c.label}
-                </button>
-              ))}
-              <button className="confirmBtn confirmBtn--cancel" type="button" onClick={onDismissIntentConfirmation}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        ) : null}
-
         {/* Thinking collapsible — groups all reasoning steps */}
         {(isBusy || timeline.length > 0) ? (
           <div className="thinkingCollapsible">
@@ -418,10 +359,8 @@ export function AssistantPanel({
 
       {/* ── Input area ── */}
       <div className="inputArea">
-        {pendingIntentRefine || pendingQuestion ? (
-          <p className="inputHint">
-            {pendingIntentRefine ? "What would you like to change?" : pendingQuestion}
-          </p>
+        {pendingQuestion ? (
+          <p className="inputHint">{pendingQuestion}</p>
         ) : null}
         <textarea
           className="mainInput"
@@ -430,7 +369,7 @@ export function AssistantPanel({
           onKeyDown={handleKeyDown}
           placeholder={inputPlaceholder}
           rows={3}
-          disabled={!!pendingIntentConfirmation && !pendingIntentRefine}
+          disabled={false}
         />
         <div className="inputActions">
           <button
@@ -442,8 +381,8 @@ export function AssistantPanel({
           >
             {isRecording ? "⏹" : "🎤"}
           </button>
-          {pendingIntentRefine || pendingQuestion ? (
-            <button className="cancelBtn" type="button" onClick={pendingIntentRefine ? onCancelRefine : onSkipPendingQuestion}>
+          {pendingQuestion ? (
+            <button className="cancelBtn" type="button" onClick={onSkipPendingQuestion}>
               Cancel
             </button>
           ) : null}
@@ -455,11 +394,7 @@ export function AssistantPanel({
             <button
               className="sendBtn"
               type="button"
-              disabled={
-                isBusy && !pendingIntentRefine && !pendingQuestion
-                  ? true
-                  : !pendingIntentRefine && !pendingQuestion && (!goal.trim() || !!pendingIntentConfirmation)
-              }
+              disabled={isBusy && !pendingQuestion ? true : !pendingQuestion && !goal.trim()}
               onClick={onSend}
             >
               {sendLabel}

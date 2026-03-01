@@ -139,17 +139,16 @@ export function getActionScript(
       target.value = action.text;
       target.dispatchEvent(new Event("input", { bubbles: true }));
       target.dispatchEvent(new Event("change", { bubbles: true }));
-      if (/google\\.com/.test(window.location.hostname)) {
-        const form = target.closest("form");
-        if (form && typeof form.requestSubmit === "function") {
-          form.requestSubmit();
-        } else {
-          target.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
-          target.dispatchEvent(new KeyboardEvent("keypress", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
-          target.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
-        }
+      // Always press Enter after typing into an input field (submit search, etc.)
+      const form = target.closest("form");
+      if (form && typeof form.requestSubmit === "function") {
+        form.requestSubmit();
+      } else {
+        target.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
+        target.dispatchEvent(new KeyboardEvent("keypress", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
+        target.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
       }
-      return { ok: true, message: "Typed into " + action.elementId + (/google\\.com/.test(window.location.hostname) ? " (Enter pressed)" : ""), action };
+      return { ok: true, message: "Typed into " + action.elementId + " (Enter pressed)", action };
     }
     return { ok: false, message: "Target is not a text input", action };
   }
