@@ -88,14 +88,27 @@ export default function App() {
   const summarizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const pushTimeline = useCallback((kind: AgentTimelineEvent["kind"], message: string) => {
-    setTimeline((prev) => [
-      ...prev,
-      {
-        ts: new Date().toISOString(),
-        kind,
-        message,
-      },
-    ]);
+    const ts = new Date().toISOString();
+    setTimeline((prev) => [...prev, { ts, kind, message }]);
+
+    // Mirror meaningful steps into the chat feed so the user can follow along
+    const prefix: Record<AgentTimelineEvent["kind"], string | null> = {
+      observe: "👀 Looking at page",
+      plan:    "🧠 Thinking",
+      act:     "🖱️ Doing",
+      verify:  "✅ Checking",
+      question:"❓ Question",
+      user:    null, // already shown as a user bubble
+      summary: null, // shown separately as page summary
+      error:   "⚠️ Error",
+    };
+    const label = prefix[kind];
+    if (label !== null) {
+      setChatMessages((prev) => [
+        ...prev,
+        { ts, role: "system" as const, text: `${label}: ${message}` },
+      ]);
+    }
   }, []);
 
   const pushChat = useCallback((role: ChatMessage["role"], text: string) => {
@@ -397,6 +410,7 @@ export default function App() {
           fastMode,
           enableSafetyGuardrails,
           requireApprovalForRiskyActions,
+          onEvent: pushTimeline,
         },
         {
           goal,
@@ -452,6 +466,7 @@ export default function App() {
     }
 
     setIntentInferring(true);
+    setGoal("");
     try {
       const result = (await window.steadyhands.inferIntent(goal)) as {
         inferredGoal: string;
@@ -591,7 +606,11 @@ export default function App() {
     }
     summarizeDebounceRef.current = setTimeout(() => {
       summarizeDebounceRef.current = null;
-      void summarizeCurrentPage(goal);
+      if (goal.trim()) {
+        void summarizeCurrentPage(goal);
+      } else {
+        setSummary(null);
+      }
     }, 250);
   };
 
@@ -600,6 +619,7 @@ export default function App() {
     if (answer) {
       pushChat("user", answer);
     }
+    setPendingQuestionInput("");
     askUserResolveRef.current?.(answer);
   }, [pendingQuestionInput, pushChat]);
 
