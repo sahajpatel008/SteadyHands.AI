@@ -604,13 +604,22 @@ The user answered: "${userAnswer}"
 The original goal/plan was:
 ${originalGoal.slice(0, 2000)}
 
-Update the goal, completion_point, planSteps, and searchQuery to reflect the user's clarification. The refined goal should be specific and actionable. The completion_point should describe the final state when we're done. The planSteps should be the updated step-by-step plan. The searchQuery (if a search is needed) should be the short query.
+First, determine which case applies:
+A) CLARIFYING AMONG OPTIONS: The user is picking from the options offered (e.g. "the first one", "option 2", "yes", "no" to one option). Keep the same overall goal; append their choice.
+B) NEW GOAL: The user is giving a completely different instruction (e.g. "go to irs and get me the 1040sr form", "actually I need the W-2", "navigate to example.com"). Replace the goal with their new instruction.
+
+For case B (NEW GOAL), the refinedGoal MUST use this exact format so the planner recognizes it:
+- Include a line: "User clarification: [NEW GOAL] {user's exact instruction}"
+- Put the user's new instruction as the primary inferred goal at the top.
+- Example: "Inferred goal: Navigate to IRS.gov and download Form 1040-SR.\n\nUser clarification: [NEW GOAL] go to irs and get me the 1040sr form"
+
+For case A (clarifying among options), use: "User clarification: {their choice}"
 
 Return ONLY a JSON object with these keys:
-- refinedGoal: string (the updated full goal text, including "Inferred goal:", "Plan:", "Original user message:", and "User clarification: {answer}")
+- refinedGoal: string (updated goal; for NEW GOAL use the format above so planner can detect it)
 - completion_point: string (when we're done)
-- planSteps: array of strings (updated plan steps)
-- searchQuery: string or null (short search query if needed)`;
+- planSteps: array of strings (updated plan steps; for NEW GOAL include "Navigate to [target site]", "Search for [query]", etc.)
+- searchQuery: string or null (short search query; for NEW GOAL use e.g. "IRS.gov Form 1040-SR" or "irs 1040sr form")`;
 
   const content = buildContentParts(prompt);
   const text = await chatCompletion(model, content, {
@@ -985,6 +994,11 @@ ACTION SOURCE OF TRUTH:
 - If user says "option N", pick that exact valid index when possible.
 - Return raw action only when there are zero executable semantic options.
 
+USER CHANGED GOAL (CRITICAL): When the goal contains "User clarification:" followed by a NEW destination or task (e.g. "go to irs", "[NEW GOAL] get 1040sr form", "navigate to IRS.gov", "download 1040-SR") and the current page/URL does NOT match that target—ignore the semantic options and return a raw navigate or type action instead:
+  - If on google.com: return action with type "type" to search for the new target (e.g. "IRS.gov Form 1040-SR"), or type "navigate" with the direct URL if known (e.g. "https://www.irs.gov/forms-pubs/about-form-1040-sr").
+  - If NOT on google.com: return action with type "navigate" to "https://www.google.com/search?q=" + encoded search query for the new goal, so we can then search and reach the target.
+  - Do NOT ask the user to confirm. The user has already given a direct instruction. Proceed immediately.
+
 MCP TOOL USE:
 - Use MCP tools when browser actions cannot directly obtain required external data or perform non-UI tasks.
 - If using MCP tool, return mcpToolCall with {server, name, arguments}.
@@ -1021,7 +1035,10 @@ If semantic options exist, pick the BEST matching one (most relevant to goal) an
 If MCP tool is needed, return:
 {"done": false, "reasoning": "...", "confidence": 0.85, "expectedOutcome": "...", "mcpToolCall": {"server": "serverName", "name": "toolName", "arguments": {}}}
 
-Only if no executable semantic options exist, return ONE raw action:
+If user changed goal (goal contains "User clarification:" with new site/task and current page is irrelevant), return raw navigate or type action even if semantic options exist:
+{"done": false, "reasoning": "User requested different site/task. Navigating to reach it.", "confidence": 0.9, "expectedOutcome": "...", "action": {"type": "navigate", "url": "https://www.google.com/search?q=..."} or {"type": "type", "elementId": "...", "text": "short search query"}}
+
+Otherwise, only if no executable semantic options exist, return ONE raw action:
 {"done": false, "reasoning": "...", "confidence": 0.85, "expectedOutcome": "...", "action": {"type": "click"|"type"|"select"|"scroll"|"navigate", ...}}
 `;
 

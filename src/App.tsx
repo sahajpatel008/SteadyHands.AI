@@ -550,8 +550,10 @@ export default function App() {
 
   const clearSession = useCallback(() => {
     // 1. Abort any in-flight agent run
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
+    if (runIdRef.current) {
+      window.steadyhands.abortAgent(runIdRef.current);
+      runIdRef.current = null;
+    }
 
     // 2. Resolve any pending user-question promise so the agent loop exits cleanly
     if (askUserResolveRef.current) {
