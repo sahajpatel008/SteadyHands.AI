@@ -79,6 +79,14 @@ body {
   border-color: var(--accent);
 }
 
+.navBtn--clear {
+  background: #fff3f3;
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.navBtn--clear:hover { filter: brightness(0.93); }
+
 .navBtn:hover { filter: brightness(0.93); }
 .navBtn:disabled { cursor: not-allowed; opacity: 0.45; }
 

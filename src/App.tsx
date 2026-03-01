@@ -674,6 +674,51 @@ export default function App() {
     askUserResolveRef.current?.(null);
   }, [pushChat]);
 
+  const clearSession = useCallback(() => {
+    // 1. Abort any in-flight agent run
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+
+    // 2. Resolve any pending user-question promise so the agent loop exits cleanly
+    if (askUserResolveRef.current) {
+      askUserResolveRef.current(null);
+      askUserResolveRef.current = null;
+    }
+
+    // 3. Stop any TTS audio
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
+    setIsSpeaking(false);
+
+    // 4. Cancel any pending summarize debounce
+    if (summarizeDebounceRef.current) {
+      clearTimeout(summarizeDebounceRef.current);
+      summarizeDebounceRef.current = null;
+    }
+
+    // 5. Reset all session state
+    setChatMessages([]);
+    setTimeline([]);
+    setSummary(null);
+    setFinalAnswer("");
+    setGoal("");
+    setRunning(false);
+    setIntentInferring(false);
+    setPendingQuestion(null);
+    setPendingQuestionInput("");
+    setPendingIntentConfirmation(null);
+    setPendingIntentRefine(false);
+    summaryRequestIdRef.current += 1;
+
+    // 6. Navigate browser back to the home page
+    browserRef.current?.navigate(DEFAULT_URL);
+    setCurrentUrl(DEFAULT_URL);
+
+    logRenderer("App", "clearSession: session cleared");
+  }, []);
+
   return (
     <div className="appRoot">
       <NavigationBar
@@ -681,7 +726,7 @@ export default function App() {
         onNavigate={(url) => browserRef.current?.navigate(url)}
         onBack={() => browserRef.current?.goBack()}
         onForward={() => browserRef.current?.goForward()}
-        onRefresh={() => browserRef.current?.refresh()}
+        onClearSession={clearSession}
       />
       <div className="contentSplit">
         <AssistantPanel

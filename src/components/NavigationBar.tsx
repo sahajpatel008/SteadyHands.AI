@@ -5,7 +5,7 @@ type Props = {
   onNavigate: (url: string) => void;
   onBack: () => void;
   onForward: () => void;
-  onRefresh: () => void;
+  onClearSession: () => void;
 };
 
 export function NavigationBar({
@@ -13,7 +13,7 @@ export function NavigationBar({
   onNavigate,
   onBack,
   onForward,
-  onRefresh,
+  onClearSession,
 }: Props) {
   const [inputUrl, setInputUrl] = useState(currentUrl);
 
@@ -47,8 +47,8 @@ export function NavigationBar({
       <button className="navBtn" type="button" onClick={onForward}>
         Next
       </button>
-      <button className="navBtn" type="button" onClick={onRefresh}>
-        Reload
+      <button className="navBtn navBtn--clear" type="button" onClick={onClearSession}>
+        Clear Chat
       </button>
       <input
         className="urlInput"
