@@ -46,6 +46,11 @@ type Props = {
   confidenceThreshold: number;
 };
 
+/** Returns true when a page choice has a runnable action */
+function choiceRunnable(choice: PageSummary["choices"][number]): boolean {
+  return !!choiceToAction(choice);
+}
+
 export function AssistantPanel({
   summary,
   timeline,
@@ -75,8 +80,7 @@ export function AssistantPanel({
   finalAnswer,
   confidenceThreshold,
 }: Props) {
-  const timelineRef = useRef<HTMLDivElement | null>(null);
-  const chatRef = useRef<HTMLDivElement | null>(null);
+  const feedRef = useRef<HTMLDivElement | null>(null);
 
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -194,275 +198,212 @@ export function AssistantPanel({
   };
 
   useEffect(() => {
-    if (timelineRef.current) {
-      timelineRef.current.scrollTop = timelineRef.current.scrollHeight;
+    if (feedRef.current) {
+      feedRef.current.scrollTop = feedRef.current.scrollHeight;
     }
-  }, [timeline]);
+  }, [chatMessages, timeline, pendingQuestion, summary, finalAnswer]);
 
-  useEffect(() => {
-    if (chatRef.current) {
-      chatRef.current.scrollTop = chatRef.current.scrollHeight;
+  // Determine what textarea and primary action to show
+  const isBusy = running || intentInferring || isTranscribing;
+  const latestActivity = timeline.length > 0 ? timeline[timeline.length - 1] : null;
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (isRecording) { toggleRecording(); return; }
+      if (pendingIntentRefine) { onSubmitRefine(); return; }
+      if (pendingQuestion) { onSubmitPendingQuestion(); return; }
+      if (!running && !intentInferring && goal.trim() && !pendingIntentConfirmation) {
+        onRun();
+      }
     }
-  }, [chatMessages, pendingQuestion]);
-
-  const phaseLabel = (kind: AgentTimelineEvent["kind"]): string => {
-    if (kind === "observe") return "SEE";
-    if (kind === "act") return "ACT";
-    return "THINK";
   };
+
+  const inputValue = pendingIntentRefine || pendingQuestion ? pendingQuestionInput : goal;
+  const onInputChange = pendingIntentRefine || pendingQuestion ? onPendingQuestionInputChange : onGoalChange;
+
+  const sendLabel = pendingIntentRefine
+    ? "Update"
+    : pendingQuestion
+    ? "Reply"
+    : intentInferring
+    ? "Thinking…"
+    : running
+    ? "Running…"
+    : "Go";
+
+  const onSend = () => {
+    if (isRecording) { toggleRecording(); return; }
+    if (pendingIntentRefine) { onSubmitRefine(); return; }
+    if (pendingQuestion) { onSubmitPendingQuestion(); return; }
+    if (!running && !intentInferring && goal.trim() && !pendingIntentConfirmation) {
+      onRun();
+    }
+  };
+
+  const inputPlaceholder = pendingIntentRefine
+    ? "What would you like to change?"
+    : pendingQuestion
+    ? pendingQuestion
+    : "Find the Form 1040-SR (Tax Return for Seniors) and get the PDF download link. ";
 
   return (
     <aside className="assistantPanel">
+      {/* ── Header ── */}
       <div className="panelHeader">
-        <h1>SteadyHands</h1>
-        <span className={`statusChip ${running ? "statusChip--busy" : "statusChip--ready"}`}>
-          {running ? "Running" : "Ready"}
+        <h1 className="panelTitle">SteadyHands</h1>
+        <span className={`statusBadge ${isBusy ? "statusBadge--busy" : "statusBadge--ready"}`}>
+          {isBusy ? "Working…" : "Ready"}
         </span>
       </div>
-      <div className="panelMeta">
-        <span>Assist: {confidenceThreshold.toFixed(2)}</span>
-        <label htmlFor="safetyGuardrailsToggle">
-          <input
-            id="safetyGuardrailsToggle"
-            type="checkbox"
-            checked={enableSafetyGuardrails}
-            onChange={(event) => onToggleSafetyGuardrails(event.target.checked)}
-          />{" "}
-          Safety checks
-        </label>
-      </div>
 
-      <section className="section">
-        <h2>Chat</h2>
-        <div className="chatMessages" ref={chatRef}>
-          {chatMessages.length === 0 ? (
-            <p className="subtle">No chat messages yet.</p>
-          ) : (
-            chatMessages.map((message, index) => (
-              <div
-                key={`${message.ts}-${index}`}
-                className={`chatMessage chatMessage--${message.role}`}
-              >
-                <span>{message.role === "agent" ? "AGENT" : message.role === "user" ? "YOU" : "SYSTEM"}</span>
-                <p>{message.text}</p>
-              </div>
-            ))
-          )}
-        </div>
-        {pendingIntentConfirmation && !pendingIntentRefine ? (
-          <div className="intentConfirmation">
-            <p className="subtle">Proceed or refine?</p>
-            <div className="intentConfirmationActions">
+      {/* ── Unified message / action feed ── */}
+      <div className="messageFeed" ref={feedRef}>
+
+        {/* Empty state */}
+        {chatMessages.length === 0 && !summary && !finalAnswer && (
+          <p className="feedHint">Describe what you need help with below, or use the mic.</p>
+        )}
+
+        {/* Chat messages */}
+        {chatMessages.map((msg, i) => (
+          <div
+            key={`${msg.ts}-${i}`}
+            className={`bubble bubble--${msg.role === "agent" ? "agent" : msg.role === "user" ? "user" : "system"}`}
+          >
+            <span className="bubbleLabel">
+              {msg.role === "agent" ? "Assistant" : msg.role === "user" ? "You" : "Info"}
+            </span>
+            <p className="bubbleText">{msg.text}</p>
+          </div>
+        ))}
+
+        {/* Final answer highlight */}
+        {finalAnswer ? (
+          <div className="answerCard">
+            <span className="answerLabel">Answer</span>
+            <p className="answerText">{finalAnswer}</p>
+          </div>
+        ) : null}
+
+        {/* Page summary */}
+        {summary?.summary ? (
+          <div className="pageSummaryCard">
+            <p className="pageSummaryText">{summary.summary}</p>
+            {summary.purpose ? <p className="pagePurpose">{summary.purpose}</p> : null}
+          </div>
+        ) : null}
+
+        {/* Page action choices */}
+        {summary?.choices?.length ? (
+          <div className="choiceGroup">
+            {summary.choices.map((choice, idx) => (
               <button
-                className="navBtn primary"
+                key={`${choice.label}-${idx}`}
+                className="choiceBtn"
                 type="button"
-                onClick={onProceedIntent}
+                disabled={running || !choiceRunnable(choice)}
+                onClick={() => onChoiceExecute(idx)}
               >
-                Proceed with this plan
+                <span className="choiceBtnNum">{idx + 1}</span>
+                <span className="choiceBtnBody">
+                  <strong>{choice.label}</strong>
+                  {choice.rationale ? <span className="choiceBtnRationale">{choice.rationale}</span> : null}
+                </span>
               </button>
-              <button className="navBtn" type="button" onClick={onRefineIntent}>
-                Refine
+            ))}
+          </div>
+        ) : null}
+
+        {/* Intent confirmation */}
+        {pendingIntentConfirmation && !pendingIntentRefine ? (
+          <div className="confirmCard">
+            <p className="confirmQuestion">Does this look right?</p>
+            <p className="confirmPlan">{pendingIntentConfirmation.inferredGoal}</p>
+            <div className="confirmActions">
+              <button className="confirmBtn confirmBtn--yes" type="button" onClick={onProceedIntent}>
+                Yes, go ahead
               </button>
-              {pendingIntentConfirmation.choices.map((choice, index) => (
+              <button className="confirmBtn" type="button" onClick={onRefineIntent}>
+                Change it
+              </button>
+              {pendingIntentConfirmation.choices.map((c, i) => (
                 <button
-                  key={`${choice.label}-${index}`}
-                  className="navBtn"
+                  key={`${c.label}-${i}`}
+                  className="confirmBtn"
                   type="button"
-                  onClick={() => onPickIntentChoice(choice)}
+                  onClick={() => onPickIntentChoice(c)}
                 >
-                  {choice.label}
+                  {c.label}
                 </button>
               ))}
-              <button
-                className="navBtn"
-                type="button"
-                onClick={onDismissIntentConfirmation}
-              >
+              <button className="confirmBtn confirmBtn--cancel" type="button" onClick={onDismissIntentConfirmation}>
                 Cancel
               </button>
             </div>
           </div>
         ) : null}
-        {pendingIntentRefine ? (
-          <div className="chatComposer">
-            <p className="subtle">What would you like to change?</p>
-            <textarea
-              className="goalInput"
-              value={pendingQuestionInput}
-              onChange={(event) => onPendingQuestionInputChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  if (isRecording) {
-                    toggleRecording();
-                    return;
-                  }
-                  onSubmitRefine();
-                }
-              }}
-              placeholder="Describe what you want instead..."
-              rows={3}
-            />
-            <div className="modalActions">
-              <button
-                type="button"
-                style={{ backgroundColor: isRecording ? "#f44336" : undefined }}
-                onClick={toggleRecording}
-                title="Toggle Voice STT"
-              >
-                {isRecording ? "Stop Mic" : isTranscribing ? "Typing..." : "🎤 Mic"}
-              </button>
-              <button type="button" onClick={onSubmitRefine}>
-                Re-infer
-              </button>
-              <button type="button" onClick={onCancelRefine}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        ) : null}
-        {pendingQuestion && !pendingIntentRefine ? (
-          <div className="chatComposer">
-            <p className="subtle">Reply (Enter to send)</p>
-            <textarea
-              className="goalInput"
-              value={pendingQuestionInput}
-              onChange={(event) => onPendingQuestionInputChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  if (isRecording) {
-                    toggleRecording();
-                    return;
-                  }
-                  onSubmitPendingQuestion();
-                }
-              }}
-              placeholder='Type "yes" or your instruction...'
-              rows={3}
-            />
-            <div className="modalActions">
-              <button
-                type="button"
-                style={{ backgroundColor: isRecording ? "#f44336" : undefined }}
-                onClick={toggleRecording}
-                title="Toggle Voice STT"
-              >
-                {isRecording ? "Stop Mic" : isTranscribing ? "Typing..." : "🎤 Mic"}
-              </button>
-              <button type="button" onClick={onSubmitPendingQuestion}>
-                Send
-              </button>
-              <button type="button" onClick={onSkipPendingQuestion}>
-                Dismiss
-              </button>
-            </div>
-          </div>
-        ) : null}
-      </section>
 
-      <section className="section">
-        <label className="label" htmlFor="goalInput">
-          Task
-        </label>
+        {/* Live activity status */}
+        {isBusy && latestActivity ? (
+          <div className="activityStatus">
+            <span className="activitySpinner" aria-hidden="true" />
+            <span className="activityText">{latestActivity.message}</span>
+          </div>
+        ) : null}
+      </div>
+
+      {/* ── Input area ── */}
+      <div className="inputArea">
+        {pendingIntentRefine || pendingQuestion ? (
+          <p className="inputHint">
+            {pendingIntentRefine ? "What would you like to change?" : pendingQuestion}
+          </p>
+        ) : null}
         <textarea
-          id="goalInput"
-          className="goalInput"
-          value={goal}
-          onChange={(event) => onGoalChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              if (isRecording) {
-                toggleRecording();
-                return;
-              }
-              if (!running && !intentInferring && goal.trim() && !pendingIntentConfirmation) {
-                onRun();
-              }
-            }
-          }}
-          placeholder="Example: Find the Form 1040-SR (Tax Return for Seniors) and get the PDF download link."
-          rows={4}
+          className="mainInput"
+          value={inputValue}
+          onChange={(e) => onInputChange(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={inputPlaceholder}
+          rows={3}
+          disabled={!!pendingIntentConfirmation && !pendingIntentRefine}
         />
-        <div className="runBtnRow">
-          {(running || intentInferring || isTranscribing) ? (
-            <span className="runSpinner" aria-hidden="true" />
-          ) : null}
+        <div className="inputActions">
           <button
-            className="runBtn"
+            className={`micBtn${isRecording ? " micBtn--active" : ""}`}
             type="button"
-            style={{ backgroundColor: isRecording ? "#f44336" : undefined }}
             onClick={toggleRecording}
-            title="Toggle Voice STT"
+            title={isRecording ? "Stop recording" : "Speak your request"}
+            aria-label={isRecording ? "Stop recording" : "Start voice input"}
           >
-            {isRecording ? "Stop Mic" : isTranscribing ? "Transcribing..." : "🎤 Mic"}
+            {isRecording ? "⏹" : "🎤"}
           </button>
-          <button
-            className="runBtn"
-            type="button"
-            disabled={running || intentInferring || isTranscribing || !goal.trim() || !!pendingIntentConfirmation}
-            onClick={onRun}
-          >
-            {intentInferring ? "Thinking..." : running ? "Running..." : "Run Agent"}
-          </button>
-          {running ? (
-            <button className="interruptBtn" type="button" onClick={onInterrupt}>
-              Interrupt
+          {pendingIntentRefine || pendingQuestion ? (
+            <button className="cancelBtn" type="button" onClick={pendingIntentRefine ? onCancelRefine : onSkipPendingQuestion}>
+              Cancel
             </button>
           ) : null}
-        </div>
-      </section>
-
-      <section className="section">
-        <h2>Page</h2>
-        <p className="summaryLead">{summary?.summary ?? "Open a page to see actions."}</p>
-        <p className="purpose">{summary?.purpose ?? ""}</p>
-        {summary?.choices?.length ? (
-          <ul className="choicesList">
-            {summary.choices.map((choice, index) => (
-              <li key={`${choice.label}-${index}`}>
-                <div className="choiceHead">
-                  <span className="choiceIndex">{index + 1}</span>
-                  <strong>{choice.label}</strong>
-                </div>
-                <p className="choiceRationale">{choice.rationale}</p>
-                <button
-                  className="navBtn primary"
-                  type="button"
-                  onClick={() => onChoiceExecute(index)}
-                  disabled={running || !choiceToAction(choice)}
-                >
-                  Run
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </section>
-
-      <section className="section">
-        <h2>Activity</h2>
-        <div className="timeline" ref={timelineRef}>
-          {timeline.length === 0 ? (
-            <p className="subtle">No actions yet.</p>
+          {running ? (
+            <button className="stopBtn" type="button" onClick={onInterrupt}>
+              Stop
+            </button>
           ) : (
-            timeline.map((event, index) => (
-              <div key={`${event.ts}-${index}`} className="timelineItem">
-                <span>{phaseLabel(event.kind)}</span>
-                <p>{event.message}</p>
-              </div>
-            ))
+            <button
+              className="sendBtn"
+              type="button"
+              disabled={
+                isBusy && !pendingIntentRefine && !pendingQuestion
+                  ? true
+                  : !pendingIntentRefine && !pendingQuestion && (!goal.trim() || !!pendingIntentConfirmation)
+              }
+              onClick={onSend}
+            >
+              {sendLabel}
+            </button>
           )}
         </div>
-      </section>
-
-      {finalAnswer ? (
-        <section className="section">
-          <h2>Result</h2>
-          <p>{finalAnswer}</p>
-        </section>
-      ) : null}
+      </div>
     </aside>
   );
 }
