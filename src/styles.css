@@ -721,6 +721,7 @@ body {
   border-radius: 50%;
   border: 3px solid var(--panel-border);
   background: #fff;
+  color: var(--text);
   font-size: 1.5rem;
   cursor: pointer;
   display: flex;
@@ -735,6 +736,7 @@ body {
 .micBtn--active {
   background: var(--danger);
   border-color: var(--danger);
+  color: #fff;
   animation: micPulse 1s ease-in-out infinite;
 }
 

@@ -379,7 +379,17 @@ export function AssistantPanel({
             title={isRecording ? "Stop recording" : "Speak your request"}
             aria-label={isRecording ? "Stop recording" : "Start voice input"}
           >
-            {isRecording ? "⏹" : "🎤"}
+            {isRecording ? (
+              /* Stop square */
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+            ) : (
+              /* Microphone */
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true">
+                <path d="M12 1a4 4 0 0 1 4 4v6a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm-1.5 18.93A8.001 8.001 0 0 1 4 12H2a10 10 0 0 0 9 9.95V24h2v-2.05A10 10 0 0 0 22 12h-2a8.001 8.001 0 0 1-6.5 7.93V19.5h-3v.43z"/>
+              </svg>
+            )}
           </button>
           {pendingQuestion ? (
             <button className="cancelBtn" type="button" onClick={onSkipPendingQuestion}>
