@@ -59,19 +59,6 @@ declare global {
         availableMcpTools?: McpToolDescriptor[];
         currentStep?: string;
       }) => Promise<unknown>;
-      pathDbAddBannedActions: (signatures: string[]) => Promise<void>;
-      pathDbGetBannedActions: () => Promise<string[]>;
-      pathDbSaveValidPath: (payload: {
-        promptKey: string;
-        goal: string;
-        actions: BrowserAction[];
-      }) => Promise<{ optimizedCount: number }>;
-      pathDbFindMatchingPath: (prompt: string) => Promise<{
-        promptKey: string;
-        promptNormalized: string;
-        actions: BrowserAction[];
-        createdAt: string;
-      } | null>;
     };
   }
 

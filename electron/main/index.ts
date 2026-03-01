@@ -9,15 +9,7 @@ import {
   summarizePage,
   safetySupervisor,
   semanticInterpreter,
-  optimizePath,
-  semanticMatchPrompts,
 } from "./llm";
-import {
-  addBannedActions as pathDbAddBanned,
-  getBannedActions as pathDbGetBanned,
-  addValidPath as pathDbAddValid,
-  findMatchingPath as pathDbFindMatching,
-} from "./pathDb";
 import { logMain } from "../../shared/logger";
 import { McpClientManager } from "./mcp";
 import type { McpToolCall, PageObservation, PlanActionInput } from "../../shared/types";
@@ -177,33 +169,6 @@ function setupIpcHandlers() {
     return result;
   });
 
-  ipcMain.handle("pathDb:addBannedActions", async (_, signatures: string[]) => {
-    pathDbAddBanned(signatures);
-    return undefined;
-  });
-
-  ipcMain.handle("pathDb:getBannedActions", () => pathDbGetBanned());
-
-  ipcMain.handle(
-    "pathDb:saveValidPath",
-    async (
-      _,
-      payload: { promptKey: string; goal: string; actions: import("../../shared/types").BrowserAction[] },
-    ) => {
-      const optimized = await optimizePath(payload.actions, payload.goal);
-      pathDbAddValid({
-        promptKey: payload.promptKey,
-        promptNormalized: payload.goal.slice(0, 500),
-        actions: optimized,
-        createdAt: new Date().toISOString(),
-      });
-      return { optimizedCount: optimized.length };
-    },
-  );
-
-  ipcMain.handle("pathDb:findMatchingPath", async (_, prompt: string) => {
-    return pathDbFindMatching(prompt, semanticMatchPrompts);
-  });
 }
 
 app.whenReady().then(() => {

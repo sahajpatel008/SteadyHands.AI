@@ -77,7 +77,6 @@ export default function App() {
   const [enableSafetyGuardrails, setEnableSafetyGuardrails] = useState(false);
   const [requireApprovalForRiskyActions, setRequireApprovalForRiskyActions] = useState(false);
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.7);
-  const [canSavePath, setCanSavePath] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [pendingQuestionInput, setPendingQuestionInput] = useState("");
   const [pendingIntentConfirmation, setPendingIntentConfirmation] =
@@ -86,11 +85,6 @@ export default function App() {
   const askUserResolveRef = useRef<((answer: string | null) => void) | null>(null);
   const summaryRequestIdRef = useRef(0);
   const summarizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastRunForThumbsUpRef = useRef<{
-    goal: string;
-    executedActions: BrowserAction[];
-    completed: boolean;
-  } | null>(null);
 
   const pushTimeline = useCallback((kind: AgentTimelineEvent["kind"], message: string) => {
     setTimeline((prev) => [
@@ -344,16 +338,12 @@ export default function App() {
       abortControllerRef.current = new AbortController();
       setRunning(true);
       setFinalAnswer("");
-      setCanSavePath(false);
       summaryRequestIdRef.current += 1;
       try {
-        const [initialObservation, systemContext, presavedPath, initialBannedActions] =
-          await Promise.all([
-            browserRef.current.observe(),
-            window.steadyhands.getSystemContext().catch(() => null),
-            window.steadyhands.pathDbFindMatchingPath(goal),
-            window.steadyhands.pathDbGetBannedActions(),
-          ]);
+        const [initialObservation, systemContext] = await Promise.all([
+          browserRef.current.observe(),
+          window.steadyhands.getSystemContext().catch(() => null),
+        ]);
         const output = await runAgentGraph(
         {
           inferIntent: (rawGoal) =>
@@ -388,7 +378,6 @@ export default function App() {
           act: executeBrowserAction,
           goBack: () => browserRef.current?.goBack(),
           canGoBack: () => browserRef.current?.canGoBack?.() ?? false,
-          onBannedActions: (sigs) => void window.steadyhands.pathDbAddBannedActions(sigs),
           maxSteps: 0,
           actionTimeoutMs,
           verifyTimeoutMs,
@@ -404,8 +393,6 @@ export default function App() {
           resolvedGoal,
           searchQuery: opts?.searchQuery,
           planSteps: opts?.planSteps,
-          presavedPath: presavedPath?.actions,
-          initialBannedActions: initialBannedActions?.length ? initialBannedActions : undefined,
           signal: abortControllerRef.current.signal,
           systemContext: systemContext ?? undefined,
         },
@@ -418,12 +405,6 @@ export default function App() {
         setTimeline(output.timeline);
         setSummary(output.finalSummary);
         setFinalAnswer(output.finalAnswer);
-        lastRunForThumbsUpRef.current = {
-          goal,
-          executedActions: output.executedActions ?? [],
-          completed: output.completed,
-        };
-        setCanSavePath((output.executedActions?.length ?? 0) > 0 && output.completed);
       } catch (error) {
         logRenderer("App", "Agent run failed", { error: String(error) });
         pushTimeline("error", error instanceof Error ? error.message : "Unknown error");
@@ -575,22 +556,6 @@ export default function App() {
     }
   }, [pendingIntentConfirmation, pendingQuestionInput, pushChat]);
 
-  const onThumbsUp = useCallback(async () => {
-    const last = lastRunForThumbsUpRef.current;
-    if (!last || last.executedActions.length === 0) return;
-    try {
-      await window.steadyhands.pathDbSaveValidPath({
-        promptKey: last.goal.slice(0, 200),
-        goal: last.goal,
-        actions: last.executedActions,
-      });
-      pushChat("system", "Path saved. Future runs with similar goals will use this path.");
-    } catch (error) {
-      logRenderer("App", "pathDbSaveValidPath failed", { error: String(error) });
-      pushChat("system", `Failed to save path: ${error instanceof Error ? error.message : "Unknown error"}`);
-    }
-  }, [pushChat]);
-
   const onUrlChanged = (nextUrl: string) => {
     logRenderer("App", "onUrlChanged", { nextUrl });
     if (nextUrl === currentUrl) {
@@ -666,8 +631,6 @@ export default function App() {
           running={running}
           finalAnswer={finalAnswer}
           confidenceThreshold={confidenceThreshold}
-          showThumbsUp={!running && !!finalAnswer && canSavePath}
-          onThumbsUp={onThumbsUp}
         />
         <BrowserPane
           ref={browserRef}

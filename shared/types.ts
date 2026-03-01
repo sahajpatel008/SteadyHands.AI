@@ -152,10 +152,6 @@ export type AgentRunInput = {
   searchQuery?: string;
   /** Queued plan steps from inferIntent. Each step is a single actionable task. */
   planSteps?: string[];
-  /** Pre-saved path to execute directly (skip planning). */
-  presavedPath?: BrowserAction[];
-  /** Banned action signatures from persistent DB. */
-  initialBannedActions?: string[];
   signal?: AbortSignal;
   systemContext?: {
     cwd?: string;
@@ -170,6 +166,6 @@ export type AgentRunOutput = {
   finalAnswer: string;
   finalSummary: PageSummary;
   timeline: AgentTimelineEvent[];
-  /** Sequence of browser actions executed during this run (for path storage). */
+  /** Sequence of browser actions executed during this run. */
   executedActions?: BrowserAction[];
 };

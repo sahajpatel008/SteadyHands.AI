@@ -29,16 +29,6 @@ const api = {
   planAction: (payload: PlanActionInput) => ipcRenderer.invoke("llm:planAction", payload),
   listMcpTools: () => ipcRenderer.invoke("mcp:listTools"),
   callMcpTool: (payload: McpToolCall) => ipcRenderer.invoke("mcp:callTool", payload),
-  pathDbAddBannedActions: (signatures: string[]) =>
-    ipcRenderer.invoke("pathDb:addBannedActions", signatures),
-  pathDbGetBannedActions: () => ipcRenderer.invoke("pathDb:getBannedActions"),
-  pathDbSaveValidPath: (payload: {
-    promptKey: string;
-    goal: string;
-    actions: import("../../shared/types").BrowserAction[];
-  }) => ipcRenderer.invoke("pathDb:saveValidPath", payload),
-  pathDbFindMatchingPath: (prompt: string) =>
-    ipcRenderer.invoke("pathDb:findMatchingPath", prompt),
 };
 
 contextBridge.exposeInMainWorld("steadyhands", api);

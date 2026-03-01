@@ -34,7 +34,6 @@ type GraphDeps = {
   act: (action: BrowserAction) => Promise<ActionExecutionResult>;
   goBack?: () => void;
   canGoBack?: () => boolean;
-  onBannedActions?: (signatures: string[]) => void;
   listMcpTools: () => Promise<McpToolDescriptor[]>;
   callMcpTool: (call: McpToolCall) => Promise<McpToolCallResult>;
   askUser: (question: string) => Promise<string | null>;
@@ -787,7 +786,7 @@ export async function runAgentGraph(
     finalAnswer: "",
     compactedContext: "",
     contextLedger: [],
-    bannedActions: new Set<string>(input.initialBannedActions ?? []),
+    bannedActions: new Set<string>(),
     actionFailureStreak: {},
     noProgressCycles: 0,
     noProgressFallbacks: 0,
@@ -848,40 +847,6 @@ export async function runAgentGraph(
     );
   }
 
-  if (input.presavedPath && input.presavedPath.length > 0) {
-    state.timeline = pushTimeline(
-      state.timeline,
-      "plan",
-      `Using presaved path (${input.presavedPath.length} actions).`,
-    );
-    for (const action of input.presavedPath) {
-      if (input.signal?.aborted) {
-        state.completed = true;
-        state.finalAnswer = "Interrupted by user.";
-        break;
-      }
-      const exec = await executeActionWithRetries(deps, action, state.timeline);
-      state.timeline = exec.timeline;
-      state.executedActions = [...state.executedActions, action];
-      if (!exec.ok) {
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `Presaved path failed at step: ${exec.lastMessage}. Continuing with planning.`,
-        );
-        break;
-      }
-      state.steps += 1;
-      const observed = await deps.observe();
-      state.observation = observed;
-      state.observationFingerprint = getObservationFingerprint(observed);
-    }
-    if (state.steps === input.presavedPath.length) {
-      state.completed = true;
-      state.finalAnswer = "Completed using presaved path.";
-    }
-  }
-
   let transitions = 0;
   while (!state.completed && transitions < recursionLimit) {
     if (input.signal?.aborted) {
@@ -909,7 +874,6 @@ export async function runAgentGraph(
       for (const sig of toBan) {
         state.bannedActions.add(sig);
       }
-      deps.onBannedActions?.(toBan);
       state.goal = `${state.goal}\nDo NOT repeat the actions that led to the stuck page.`;
       state.timeline = pushTimeline(
         state.timeline,
