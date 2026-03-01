@@ -63,7 +63,15 @@ export type GraphDeps = {
     choices: SidebarChoice[],
     question?: string,
   ) => Promise<number | null>;
+  /** Refine goal/completion_point/plan from user's clarification. When provided, called when user answers a planner_ask. */
+  refineGoalFromUserInput?: (
+    originalGoal: string,
+    userAnswer: string,
+    question: string,
+  ) => Promise<{ refinedGoal: string; completion_point?: string; planSteps?: string[]; searchQuery?: string }>;
   isRiskyForHITL: (action: BrowserAction) => boolean;
+  /** Stop before auth, login, payment, or user info—never proceed, replan. */
+  isStopAction?: (action: BrowserAction, choiceContext?: string) => boolean;
   maxSteps: number;
   actionTimeoutMs: number;
   verifyTimeoutMs: number;
@@ -319,6 +327,9 @@ export function detectStuckLoop(state: LoopState): boolean {
   return stuckMs >= LOOP_STUCK_MS && stepsIncreased;
 }
 
+const GOAL_UNCERTAINTY_PATTERN =
+  /\b(idk|i don't know|don't know|dunno|not sure|unsure)\s+(which|what)\b|user uncertainty|user input required|ask before selecting/i;
+
 export function pickDeterministicAction(
   state: LoopState,
   excludeChoiceIndices?: Set<number>,
@@ -333,6 +344,16 @@ export function pickDeterministicAction(
     .filter((entry) => !excludeChoiceIndices?.has(entry.index));
 
   if (executable.length === 0) return null;
+
+  const currentStep = state.planSteps[state.planStepIndex] ?? "";
+  const stepSaysAskUser = /\bask\s+(user|which|what)\b/i.test(currentStep);
+  if (
+    executable.length >= 2 &&
+    (GOAL_UNCERTAINTY_PATTERN.test(state.goal) || stepSaysAskUser)
+  ) {
+    return null;
+  }
+
   if (executable.length === 1) {
     return {
       action: executable[0].action,

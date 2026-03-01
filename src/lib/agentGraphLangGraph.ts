@@ -37,6 +37,7 @@ import {
   getActionSignature,
   describeAction,
 } from "./agentGraph";
+import { logMain } from "../../shared/logger";
 import type { AgentRunInput } from "../../shared/types";
 
 const MAX_TIMELINE = 2000;
@@ -648,6 +649,37 @@ export function buildAgentGraph() {
       };
     }
 
+    if (deps.refineGoalFromUserInput) {
+      try {
+        const refined = await deps.refineGoalFromUserInput(
+          state.goal,
+          trimmed,
+          toolCall.question,
+        );
+        return {
+          goal: refined.refinedGoal,
+          completion_point: refined.completion_point ?? state.completion_point,
+          planSteps: refined.planSteps ?? state.planSteps,
+          searchQuery: refined.searchQuery ?? state.searchQuery,
+          planStepIndex: 0,
+          contextLedger: [...(state.contextLedger ?? []), `user: ${trimmed}`],
+          decisionCache: {},
+          stallCycles: 0,
+          timeline: pushTimeline(
+            state.timeline,
+            "user",
+            `User clarification: ${trimmed}. Goal updated.`,
+          ),
+          toolCall: null,
+          nextRoute: "checkControls",
+        };
+      } catch (err) {
+        logMain("agent", "refineGoalFromUserInput failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     return {
       goal: `${state.goal}\nUser clarification: ${trimmed}`,
       contextLedger: [...(state.contextLedger ?? []), `user: ${trimmed}`],
@@ -714,6 +746,24 @@ export function buildAgentGraph() {
     const action = toolCall.action;
     const signature = getActionSignature(action);
     const actionDesc = describeAction(action);
+
+    const choiceContext =
+      toolCall.kind === "execute_action" ? toolCall.label : undefined;
+    if (deps.isStopAction?.(action, choiceContext)) {
+      return {
+        timeline: pushTimeline(
+          state.timeline,
+          "plan",
+          `Stopped before auth/login/payment or user info. ${actionDesc} requires strict user intervention. Replanning.`,
+        ),
+        decisionCache: {},
+        contextLedger: [...(state.contextLedger ?? []), `tool_result: stop_before_auth_payment ${actionDesc}`],
+        goal: `${state.goal}\nStopped: this action requires user auth, login, payment, or personal info. Try a different approach.`,
+        stallCycles: state.stallCycles + 1,
+        toolCall: null,
+        nextRoute: "checkControls",
+      };
+    }
 
     if (deps.enableSafetyGuardrails) {
       const validation = await deps.safetySupervisor(state.goal, action, {

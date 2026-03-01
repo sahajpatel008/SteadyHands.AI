@@ -355,22 +355,41 @@ export default function App() {
   }, [finalAnswer, ttsEnabled]);
 
   const buildResolvedGoal = useCallback(
-    (inferredGoal: string, plan: string, rawGoal: string) =>
-      [
+    (
+      inferredGoal: string,
+      plan: string,
+      rawGoal: string,
+      clarifyingQuestion?: string,
+      requireUserInput?: boolean,
+    ) => {
+      const parts = [
         `Inferred goal: ${inferredGoal}`,
         ``,
         `Plan:`,
         plan,
         ``,
         `Original user message: ${rawGoal}`,
-      ].join("\n"),
+      ];
+      if (requireUserInput || clarifyingQuestion?.trim()) {
+        parts.push(
+          ``,
+          `USER INPUT REQUIRED: The LLM determined we must ask the user for more info before selecting among options. ${clarifyingQuestion?.trim() ? `Suggested question: ${clarifyingQuestion}` : "Ask before auto-selecting."}`,
+        );
+      }
+      return parts.join("\n");
+    },
     [],
   );
 
   const startAgentWithResolvedGoal = useCallback(
     async (
       resolvedGoal: string,
-      opts?: { searchQuery?: string; planSteps?: string[]; completion_point?: string },
+      opts?: {
+        searchQuery?: string;
+        planSteps?: string[];
+        completion_point?: string;
+        clarifyingQuestion?: string;
+      },
     ) => {
       if (!browserRef.current || running) return;
       const runId = crypto.randomUUID();
@@ -468,6 +487,7 @@ export default function App() {
         completion_point?: string;
         searchQuery?: string;
         clarifyingQuestion?: string;
+        requireUserInput?: boolean;
         choices: Array<{ label: string; goal: string }>;
       };
 
@@ -478,12 +498,19 @@ export default function App() {
         return;
       }
 
-      const resolved = buildResolvedGoal(result.inferredGoal, result.plan, userMessage);
+      const resolved = buildResolvedGoal(
+        result.inferredGoal,
+        result.plan,
+        userMessage,
+        result.clarifyingQuestion,
+        result.requireUserInput,
+      );
       pushChat("agent", `I inferred: ${result.inferredGoal}\n\nPlan: ${result.plan}`);
       void startAgentWithResolvedGoal(resolved, {
         searchQuery: result.searchQuery,
         planSteps: result.planSteps,
         completion_point: result.completion_point,
+        clarifyingQuestion: result.clarifyingQuestion,
       });
     } catch (error) {
       logRenderer("App", "inferIntent failed", { error: String(error) });

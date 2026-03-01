@@ -12,13 +12,14 @@ import {
   isGoalAchieved,
   isPageRelevantToGoal,
   planAction,
+  refineGoalFromUserInput,
   resolveUserChoiceToIndex,
   safetySupervisor,
   semanticInterpreter,
 } from "./llm";
 import { getConfig } from "./config";
 import { logMain } from "../../shared/logger";
-import { isRiskyAction } from "../../shared/isRiskyAction";
+import { isRiskyAction, isStopAction } from "../../shared/isRiskyAction";
 import type {
   ActionExecutionResult,
   AgentRunInput,
@@ -239,7 +240,10 @@ export function setupAgentIpcHandlers(
           askUser: (q) => requestAskUserFromRenderer(webContents, q),
           resolveUserChoice: (answer, choices, question) =>
             resolveUserChoiceToIndex(answer, choices, question),
+          refineGoalFromUserInput: (goal, answer, question) =>
+            refineGoalFromUserInput(goal, answer, question),
           isRiskyForHITL: isRiskyAction,
+          isStopAction,
           maxSteps: params.maxSteps,
           actionTimeoutMs: params.actionTimeoutMs,
           verifyTimeoutMs: params.verifyTimeoutMs,

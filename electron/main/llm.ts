@@ -124,6 +124,8 @@ const SAFETY_TTL_MS = 8000;
 const SUMMARY_TTL_MS = 8000;
 const SEMANTIC_MAX_TOKENS = 500;
 const PLAN_MAX_TOKENS = 500;
+/** Max tokens for extended reasoning before action plan (reasoning + JSON output). */
+const PLAN_REASONING_MAX_TOKENS = 2500;
 const SAFETY_MAX_TOKENS = 260;
 const SUMMARY_MAX_TOKENS = 520;
 
@@ -364,6 +366,10 @@ const INFER_INTENT_JSON_SCHEMA = {
       description: "Short query for first search, or null if no search needed",
     },
     clarifyingQuestion: { type: "string" as const, description: "Question if ambiguous" },
+    requireUserInput: {
+      type: "boolean" as const,
+      description: "True when the agent must ask the user for more info before proceeding. Set when the message is ambiguous, incomplete, or user expressed uncertainty (e.g. 'idk which', 'not sure').",
+    },
     choices: {
       type: "array" as const,
       items: {
@@ -498,6 +504,11 @@ const intentSchema = z.object({
     .union([z.string(), z.null(), z.undefined()])
     .optional()
     .transform((v) => (typeof v === "string" ? v : undefined)),
+  requireUserInput: z
+    .union([z.boolean(), z.string()])
+    .optional()
+    .default(false)
+    .transform((v) => v === true || v === "true"),
   choices: z
     .union([
       z.array(z.object({ label: z.string(), goal: z.string() })),
@@ -527,13 +538,17 @@ Return a JSON object with EXACTLY these keys:
 - completion_point: A concise description of the FINAL state when the goal is achieved. The agent stops when it reaches this state. Examples: "IRS Form 1040-SR PDF page visible or downloadable on irs.gov", "Flight search results with Tokyo as destination", "Movie showtimes or streaming options displayed". Be specific enough to detect success.
 - searchQuery: (optional) If the first step involves a web search, the SHORT query to type (e.g. "Form 1040-SR" or "IRS Form 1040-SR PDF"). Never the full goal or plan text. Max 80 chars.
 - clarifyingQuestion: (optional) If the intent is ambiguous, one short question to help the user refine (e.g. "Do you want theater showtimes, streaming recommendations, or both?")
+- requireUserInput: (boolean) Set TRUE when the agent must ask the user for more info before proceeding. Set true when: (a) the user expressed uncertainty ("idk which", "don't know", "not sure which", "any"), (b) the message is ambiguous or incomplete, (c) there are multiple valid interpretations and the user didn't specify. Set false when the goal is clear and actionable.
 - choices: (optional) Array of 0-3 alternative interpretations when ambiguous. Each: { "label": "Short button label", "goal": "Full goal for this option" }
 
 Examples:
 - "what is IRS Form 1040-SR?" -> prompt_type: "conversational", inferredGoal: "Explain IRS Form 1040-SR", plan: "Answer the question directly"
-- "download IRS Form 1040-SR" -> prompt_type: "task", inferredGoal: "Find and download IRS Form 1040-SR", plan: "1. Search for Form 1040-SR 2. Click IRS link 3. Download PDF", planSteps: ["Search for Form 1040-SR on Google", "Click IRS.gov or official tax form link in search results", "On form page: find and click Form 1040-SR PDF download link", "Download or open the PDF"], completion_point: "IRS Form 1040-SR PDF page visible or downloadable on irs.gov", searchQuery: "IRS Form 1040-SR PDF"
+- "download IRS Form 1040-SR" -> prompt_type: "task", inferredGoal: "Find and download IRS Form 1040-SR", plan: "1. Search for Form 1040-SR 2. Click IRS link 3. Download PDF", planSteps: ["Search for Form 1040-SR on Google", "Click IRS.gov or official tax form link in search results", "On form page: find and click Form 1040-SR PDF download link", "Download or open the PDF"], completion_point: "IRS Form 1040-SR PDF page visible or downloadable on irs.gov", searchQuery: "IRS Form 1040-SR PDF", requireUserInput: false
+- "i wanna go to irs and download a form idk which" -> prompt_type: "task", inferredGoal: "Navigate to IRS and download a tax form (user unspecified which form)", plan: "1. Search for IRS.gov 2. Navigate to forms page 3. Ask user which form 4. Download selected form", planSteps: ["Search for IRS.gov on Google", "Click IRS.gov link in search results", "Navigate to forms page on irs.gov", "Ask user which form they need", "Download the form the user selects"], completion_point: "User has specified which form and we have navigated to it or downloaded it", searchQuery: "IRS.gov forms", clarifyingQuestion: "Which IRS form do you need? (e.g. Form 1040, 1040-SR, W-2, 1099)", requireUserInput: true
 - "i wanna see a movie" -> prompt_type: "task", inferredGoal: "Find movie recommendations", plan: "1. Search for movie recommendations 2. Present options", completion_point: "Movie recommendations or showtimes displayed", searchQuery: "movie recommendations"
 - "book flight to tokyo" -> prompt_type: "task", inferredGoal: "Book a flight to Tokyo", plan: "1. Navigate to flight search 2. Enter Tokyo 3. Select dates 4. Search", completion_point: "Flight search results with Tokyo as destination", searchQuery: "flights to Tokyo"
+
+When the user expresses uncertainty ("idk which", "don't know which", "not sure which", "any"), set requireUserInput: true and include clarifyingQuestion. The agent will ask before proceeding.
 
 User message:
 ${rawGoal}`;
@@ -559,9 +574,68 @@ ${rawGoal}`;
     inferredGoalLen: parsed.inferredGoal.length,
     planLen: parsed.plan.length,
     planSteps: parsed.planSteps?.length ?? 0,
+    requireUserInput: parsed.requireUserInput,
     choices: parsed.choices?.length ?? 0,
   });
   return parsed;
+}
+
+export type RefinedGoalResult = {
+  refinedGoal: string;
+  completion_point?: string;
+  planSteps?: string[];
+  searchQuery?: string;
+};
+
+/** Refine the goal, completion_point, and plan from user's clarification. Call when user answers a clarifying question. */
+export async function refineGoalFromUserInput(
+  originalGoal: string,
+  userAnswer: string,
+  question: string,
+): Promise<RefinedGoalResult> {
+  logMain("llm", "refineGoalFromUserInput start", {
+    answerLen: userAnswer.length,
+    question: question.slice(0, 60),
+  });
+  const model = config.summarizerModel;
+  const prompt = `The agent asked the user: "${question}"
+The user answered: "${userAnswer}"
+
+The original goal/plan was:
+${originalGoal.slice(0, 2000)}
+
+Update the goal, completion_point, planSteps, and searchQuery to reflect the user's clarification. The refined goal should be specific and actionable. The completion_point should describe the final state when we're done. The planSteps should be the updated step-by-step plan. The searchQuery (if a search is needed) should be the short query.
+
+Return ONLY a JSON object with these keys:
+- refinedGoal: string (the updated full goal text, including "Inferred goal:", "Plan:", "Original user message:", and "User clarification: {answer}")
+- completion_point: string (when we're done)
+- planSteps: array of strings (updated plan steps)
+- searchQuery: string or null (short search query if needed)`;
+
+  const content = buildContentParts(prompt);
+  const text = await chatCompletion(model, content, {
+    maxTokens: 800,
+    jsonMode: true,
+  });
+  logModelResponse("refineGoalFromUserInput raw", text, 400);
+  const raw = extractJson(text) as {
+    refinedGoal?: string;
+    completion_point?: string;
+    planSteps?: string[];
+    searchQuery?: string | null;
+  };
+  const result: RefinedGoalResult = {
+    refinedGoal: raw.refinedGoal ?? `${originalGoal}\n\nUser clarification: ${userAnswer}`,
+    completion_point: raw.completion_point,
+    planSteps: Array.isArray(raw.planSteps) ? raw.planSteps.filter((s) => typeof s === "string") : undefined,
+    searchQuery: typeof raw.searchQuery === "string" ? raw.searchQuery : undefined,
+  };
+  logMain("llm", "refineGoalFromUserInput done", {
+    refinedGoalLen: result.refinedGoal.length,
+    completion_point: result.completion_point?.slice(0, 60),
+    planStepsLen: result.planSteps?.length ?? 0,
+  });
+  return result;
 }
 
 /** Generate a conversational reply when the user asks a question or wants discussion (no task execution). */
@@ -734,6 +808,7 @@ Return STRICT JSON only:
 
 Rules:
 - approved: true only if the action clearly advances the user's goal. Reject if it could be phishing, accidental, or off-goal.
+- approved: false ALWAYS for login, sign-in, sign-up, authentication, payment, checkout, password entry, or any action requiring strict user info/intervention. The agent must stop before these—never proceed.
 - requiresHITL: true if the action involves payments, money, confirmations, account changes, or sensitive data. User must confirm before execution.
 
 User goal: ${userGoal}
@@ -883,7 +958,8 @@ You are a browser action planner. Return STRICT JSON only.
 Output ONLY a single JSON object—no think tags, no markdown, no commentary before or after.
 Pick only ONE next step per response.
 Always include confidence 0-1. If confidence < ${confidenceThreshold}, return askQuestion instead of action.
-Be concise. Reasoning should be one short sentence.
+
+EXTENDED REASONING (max 2000 tokens): Before determining the action plan, use extended thinking and reasoning. Think through the page content, options, and goal. Then verify that your reasoning is complete. If not complete, append new reasoning. Only after your reasoning is complete, output the final JSON decision.
 
 BEFORE EACH DECISION: Reference the plan queue below. Your action must achieve the CURRENT step.
 ${planQueueBlock}
@@ -893,11 +969,16 @@ CRITICAL: Do NOT return done=true until the user's goal is FULLY achieved.
 - For "book a flight SFO to MUM tomorrow": you must navigate to a flight search page (e.g. google.com/travel/flights), fill origin SFO, destination MUM/BOM, date tomorrow, click search. Only done when search results are shown or user has selected a flight.
 - One action per step. Keep going until the goal is achieved.
 
+USER UNCERTAINTY (CRITICAL): If the goal or original message indicates the user doesn't know which option (e.g. "idk which", "don't know which", "not sure which", "any"), NEVER auto-select. Return askQuestion with confidence 0.3. List the available options and ask them to choose. The current plan step may say "Ask user which form" or similar—in that case, return askQuestion.
+
+MULTIPLE SIMILAR OPTIONS: When 2+ options could fit the goal (e.g. multiple tax forms, similar links) and the user did NOT specify which one, return askQuestion. Do not guess. Use confidence below threshold.
+
 ACTION SOURCE OF TRUTH:
 - Thoroughly check the page content below before deciding. The target (e.g. form link, download button) may be in the content.
 - Prefer ONLY the numbered semantic options below.
 - If a PLAN QUEUE is provided above, pick the action that achieves the CURRENT step in the queue.
-- If options exist, return selectedChoiceIndex (1-based) for the BEST MATCHING choice—the one most relevant to the goal and current plan step.
+- If the CURRENT step says "Ask user" or "Ask which", return askQuestion—do not select.
+- If options exist and user DID specify which one, return selectedChoiceIndex (1-based) for the BEST MATCHING choice.
 - Avoid irrelevant links (ads, unrelated sites, generic navigation). Pick the option that directly advances the goal.
 - If user says "option N", pick that exact valid index when possible.
 - Return raw action only when there are zero executable semantic options.
@@ -943,10 +1024,10 @@ Only if no executable semantic options exist, return ONE raw action:
 `;
 
       const content = buildContentParts(prompt);
-      const maxTokens = config.turboMode ? PLAN_MAX_TOKENS : 360;
+      const maxTokens = PLAN_REASONING_MAX_TOKENS;
       let text = await chatCompletion(plannerModel, content, {
         maxTokens,
-        disableThinking: true,
+        disableThinking: false,
         jsonMode: true,
       });
       logModelResponse("planAction raw response", text, 900);
@@ -954,20 +1035,16 @@ Only if no executable semantic options exist, return ONE raw action:
       try {
         parsed = actionSchema.parse(extractJson(text));
       } catch (e) {
-        if (maxTokens < 512) {
-          logMain("llm", "planAction parse failed, retrying with higher max_tokens", {
-            error: String(e),
-          });
-          text = await chatCompletion(plannerModel, content, {
-            maxTokens: 512,
-            disableThinking: true,
-            jsonMode: true,
-          });
-          logModelResponse("planAction retry raw response", text, 900);
-          parsed = actionSchema.parse(extractJson(text));
-        } else {
-          throw e;
-        }
+        logMain("llm", "planAction parse failed, retrying without extended thinking", {
+          error: String(e),
+        });
+        text = await chatCompletion(plannerModel, content, {
+          maxTokens: 512,
+          disableThinking: true,
+          jsonMode: true,
+        });
+        logModelResponse("planAction retry raw response", text, 900);
+        parsed = actionSchema.parse(extractJson(text));
       }
       logMain("llm", "planAction parsed", {
         done: parsed.done,
