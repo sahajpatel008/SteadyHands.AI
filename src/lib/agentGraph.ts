@@ -16,8 +16,9 @@ import {
   SidebarChoice,
 } from "../../shared/types";
 import { choiceToAction } from "./choiceAction";
+import { buildAgentGraph } from "./agentGraphLangGraph";
 
-type GraphDeps = {
+export type GraphDeps = {
   inferIntent: (rawGoal: string) => Promise<{
     inferredGoal: string;
     plan: string;
@@ -56,6 +57,12 @@ type GraphDeps = {
   listMcpTools: () => Promise<McpToolDescriptor[]>;
   callMcpTool: (call: McpToolCall) => Promise<McpToolCallResult>;
   askUser: (question: string) => Promise<string | null>;
+  /** Map user's natural-language answer to choice index (1-based). When absent, only heuristic matching is used. */
+  resolveUserChoice?: (
+    answer: string,
+    choices: SidebarChoice[],
+    question?: string,
+  ) => Promise<number | null>;
   isRiskyForHITL: (action: BrowserAction) => boolean;
   maxSteps: number;
   actionTimeoutMs: number;
@@ -68,7 +75,7 @@ type GraphDeps = {
   onEvent?: (kind: AgentTimelineEvent["kind"], message: string) => void;
 };
 
-type LoopToolCall =
+export type LoopToolCall =
   | {
       kind: "ask_user";
       question: string;
@@ -87,7 +94,7 @@ type LoopToolCall =
       source: string;
     };
 
-type LoopState = {
+export type LoopState = {
   goal: string;
   searchQuery?: string;
   /** Final state from inferIntent; when reached, agent stops. */
@@ -138,8 +145,8 @@ type LoopState = {
   };
 };
 
-const LOOP_STUCK_MS = 5000;
-const LOOP_GOBACK_WAIT_MS = 2000;
+export const LOOP_STUCK_MS = 5000;
+export const LOOP_GOBACK_WAIT_MS = 2000;
 
 type ActionRunResult = {
   ok: boolean;
@@ -161,7 +168,7 @@ function percentile(values: number[], p: number): number {
 // Module-level sink so the pure pushTimeline helper can fire realtime callbacks
 let _activeOnEvent: ((kind: AgentTimelineEvent["kind"], message: string) => void) | undefined;
 
-function pushTimeline(
+export function pushTimeline(
   timeline: AgentTimelineEvent[],
   kind: AgentTimelineEvent["kind"],
   message: string,
@@ -177,7 +184,7 @@ function pushTimeline(
   ];
 }
 
-function withTimeout<T>(
+export function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
   timeoutMessage: string,
@@ -196,7 +203,7 @@ function withTimeout<T>(
   });
 }
 
-function getObservationFingerprint(observation: PageObservation): string {
+export function getObservationFingerprint(observation: PageObservation): string {
   const elementSlice = observation.elements
     .slice(0, 24)
     .map((el) => `${el.id}|${el.tag}|${el.role ?? ""}|${el.text ?? ""}`)
@@ -218,7 +225,7 @@ function compactLines(lines: string[]): string {
   return compacted.slice(-6000);
 }
 
-function describeAction(action: BrowserAction): string {
+export function describeAction(action: BrowserAction): string {
   if (action.type === "click") return `click ${action.elementId}`;
   if (action.type === "type") return `type \"${action.text}\" into ${action.elementId}`;
   if (action.type === "select") return `select \"${action.value}\" in ${action.elementId}`;
@@ -226,7 +233,7 @@ function describeAction(action: BrowserAction): string {
   return `navigate ${action.url}`;
 }
 
-function getActionSignature(action: BrowserAction): string {
+export function getActionSignature(action: BrowserAction): string {
   if (action.type === "click") return `click:${action.elementId}`;
   if (action.type === "type") return `type:${action.elementId}:${action.text}`;
   if (action.type === "select") return `select:${action.elementId}:${action.value}`;
@@ -258,7 +265,7 @@ function getToolManifest(
   return `${baseTools.join("\n")}\nsidebar_options:\n${optionTools || "(none)"}\nmcp_tools:\n${mcpLines || "(none)"}`;
 }
 
-function shortQuestion(text: string): string {
+export function shortQuestion(text: string): string {
   const cleaned = text.replace(/\s+/g, " ").trim();
   if (!cleaned) return "Choose next option.";
   const firstSentence = cleaned.split(/[.!?]/)[0]?.trim() || cleaned;
@@ -266,7 +273,7 @@ function shortQuestion(text: string): string {
   return words.slice(0, 14).join(" ") + (words.length > 14 ? "?" : "");
 }
 
-function isConfirmationQuestion(question: string): boolean {
+export function isConfirmationQuestion(question: string): boolean {
   const lower = question.toLowerCase();
   return (
     /\b(confirm|proceed|sure|yes\/no|are you sure)\b/.test(lower) ||
@@ -283,7 +290,7 @@ function tokenize(text: string): string[] {
     .slice(0, 24);
 }
 
-function getDecisionCacheKey(state: LoopState): string {
+export function getDecisionCacheKey(state: LoopState): string {
   const actionSig = state.availableActions
     .slice(0, 8)
     .map((choice) => {
@@ -300,7 +307,7 @@ function deriveGoalQuery(goal: string): string {
   return firstLine.replace(/^user clarification:\s*/i, "").slice(0, 140);
 }
 
-function detectStuckLoop(state: LoopState): boolean {
+export function detectStuckLoop(state: LoopState): boolean {
   const fp = state.observationFingerprint;
   const now = Date.now();
   if (state.pageStuckFingerprint !== fp) {
@@ -312,7 +319,7 @@ function detectStuckLoop(state: LoopState): boolean {
   return stuckMs >= LOOP_STUCK_MS && stepsIncreased;
 }
 
-function pickDeterministicAction(
+export function pickDeterministicAction(
   state: LoopState,
   excludeChoiceIndices?: Set<number>,
 ): { action: BrowserAction; label?: string; choiceIndex?: number; source: string } | null {
@@ -437,7 +444,7 @@ function pickDeterministicAction(
   };
 }
 
-function buildPromptGoal(state: LoopState, _input: AgentRunInput): string {
+export function buildPromptGoal(state: LoopState, _input: AgentRunInput): string {
   const recentUserNotes = state.contextLedger
     .filter((line) => line.startsWith("user:") || line.startsWith("tool_result:"))
     .slice(-4)
@@ -463,7 +470,7 @@ function buildPromptGoal(state: LoopState, _input: AgentRunInput): string {
   return parts.filter(Boolean).join("\n\n");
 }
 
-function resolveToolCallFromPlan(
+export function resolveToolCallFromPlan(
   plan: PlanActionResult,
   availableActions: SidebarChoice[],
   availableMcpTools: McpToolDescriptor[],
@@ -493,7 +500,7 @@ function resolveToolCallFromPlan(
     if (!selectedChoice) {
       return {
         kind: "ask_user",
-        question: `Option ${plan.selectedChoiceIndex} not found. Choose 1-${availableActions.length}.`,
+        question: "Which option would you like? Describe what you want to do.",
         reason: "invalid_option",
       };
     }
@@ -502,7 +509,7 @@ function resolveToolCallFromPlan(
     if (!selectedAction) {
       return {
         kind: "ask_user",
-        question: `Option ${plan.selectedChoiceIndex} cannot run. Choose another option number.`,
+        question: "That option cannot run. Which other option would you prefer? Describe what you want.",
         reason: "non_executable_option",
       };
     }
@@ -525,7 +532,7 @@ function resolveToolCallFromPlan(
     if (!exists) {
       return {
         kind: "ask_user",
-        question: `MCP tool ${plan.mcpToolCall.server}/${plan.mcpToolCall.name} is unavailable. Choose a sidebar option.`,
+        question: "That tool is unavailable. Which option would you like instead? Describe what you want to do.",
         reason: "unknown_mcp_tool",
       };
     }
@@ -541,7 +548,7 @@ function resolveToolCallFromPlan(
     if (executableCount > 0) {
       return {
         kind: "ask_user",
-        question: "Choose sidebar option number.",
+        question: "Which option would you like? Describe what you want to do.",
         reason: "raw_action_while_options_exist",
       };
     }
@@ -555,12 +562,12 @@ function resolveToolCallFromPlan(
 
   return {
     kind: "ask_user",
-    question: "Which option should I run next?",
+    question: "Which option would you like me to run? Describe what you want.",
     reason: "no_action",
   };
 }
 
-function maybeCompactContext(state: LoopState): LoopState {
+export function maybeCompactContext(state: LoopState): LoopState {
   const combined = `${state.compactedContext}\n${state.contextLedger.join("\n")}`;
   if (estimateTokens(combined) <= COMPACTION_TRIGGER_TOKENS) {
     return state;
@@ -586,7 +593,7 @@ function maybeCompactContext(state: LoopState): LoopState {
   };
 }
 
-function getNavigateFallbackAction(state: LoopState): BrowserAction | null {
+export function getNavigateFallbackAction(state: LoopState): BrowserAction | null {
   const goal = state.goal.toLowerCase();
   const url = state.observation.url.toLowerCase();
   const query = state.searchQuery ?? deriveGoalQuery(state.goal);
@@ -613,7 +620,7 @@ function getNavigateFallbackAction(state: LoopState): BrowserAction | null {
   return null;
 }
 
-function normalizeUrlForTried(url: string): string {
+export function normalizeUrlForTried(url: string): string {
   return url.replace(/\/$/, "").toLowerCase().trim();
 }
 
@@ -630,7 +637,7 @@ function isOrganicLink(href: string): boolean {
 }
 
 /** On search page: get first organic link from DOM (elements are in DOM order). Bypasses semantic choices. */
-function getFirstOrganicLinkFromPage(
+export function getFirstOrganicLinkFromPage(
   state: LoopState,
 ): { action: BrowserAction; label: string; elementId: string } | null {
   const elements = state.observation.elements;
@@ -651,7 +658,7 @@ function getFirstOrganicLinkFromPage(
   return null;
 }
 
-async function executeActionWithRetries(
+export async function executeActionWithRetries(
   deps: GraphDeps,
   action: BrowserAction,
   timeline: AgentTimelineEvent[],
@@ -700,40 +707,7 @@ async function executeActionWithRetries(
   return { ok: false, timeline: nextTimeline, lastMessage, reason: "failure" };
 }
 
-function findChoiceIndexFromAnswer(
-  answer: string,
-  availableActions: SidebarChoice[],
-  lastOfferedChoiceIndex: number | null,
-): number | null {
-  const trimmed = answer.trim().toLowerCase();
-  if (!trimmed) return null;
-
-  const optionMatch = trimmed.match(/(?:option\s*)?(\d+)/i);
-  if (optionMatch) {
-    const n = parseInt(optionMatch[1], 10);
-    if (n >= 1 && n <= availableActions.length) return n;
-  }
-
-  if (/^yes\b/.test(trimmed)) {
-    if (lastOfferedChoiceIndex != null) return lastOfferedChoiceIndex;
-    if (availableActions.length === 1) return 1;
-  }
-
-  const token = trimmed.split(/\s+/)[0];
-  if (token) {
-    const candidates = availableActions
-      .map((choice, index) => ({
-        index: index + 1,
-        text: `${choice.label} ${choice.rationale} ${choice.suggestedAction}`.toLowerCase(),
-      }))
-      .filter((entry) => entry.text.includes(token));
-    if (candidates.length === 1) return candidates[0].index;
-  }
-
-  return null;
-}
-
-async function refreshObservationAndSemantic(
+export async function refreshObservationAndSemantic(
   deps: GraphDeps,
   state: LoopState,
   reason: string,
@@ -863,7 +837,44 @@ export async function runAgentGraph(
     });
   }
 
-  let state: LoopState = {
+  let initialTimeline = pushTimeline(
+    pushTimeline(
+      [],
+      "plan",
+      `Goal: ${resolvedGoal.slice(0, 120)}${resolvedGoal.length > 120 ? "…" : ""}`,
+    ),
+    "observe",
+    `Observed ${input.initialObservation.elements.length} actionable elements on ${input.initialObservation.url} (cached verification snapshot)`,
+  );
+  let initialContextLedger = [
+    `observe: ${input.initialObservation.url} (${input.initialObservation.elements.length} elements)`,
+  ];
+
+  let availableMcpTools: McpToolDescriptor[] = [];
+  try {
+    availableMcpTools = await deps.listMcpTools();
+    if (availableMcpTools.length > 0) {
+      initialTimeline = pushTimeline(
+        initialTimeline,
+        "plan",
+        `Discovered ${availableMcpTools.length} MCP tools.`,
+      );
+      initialContextLedger = [...initialContextLedger, `mcp_tools: ${availableMcpTools.length}`];
+    }
+  } catch (error) {
+    initialTimeline = pushTimeline(
+      initialTimeline,
+      "plan",
+      "MCP tools unavailable. Continuing with browser-only tools.",
+    );
+    initialContextLedger = [
+      ...initialContextLedger,
+      `mcp_tools_error: ${error instanceof Error ? error.message : "unknown"}`,
+    ];
+  }
+
+  const graph = buildAgentGraph();
+  const initialState = {
     goal: resolvedGoal,
     searchQuery,
     completion_point,
@@ -873,29 +884,27 @@ export async function runAgentGraph(
     observation: input.initialObservation,
     observationFingerprint: getObservationFingerprint(input.initialObservation),
     lastSemanticFingerprint: "",
-    availableActions: [],
-    availableMcpTools: [],
+    availableActions: [] as SidebarChoice[],
+    availableMcpTools,
     currentStep: "",
-    summary: null,
-    timeline: [],
+    summary: null as PageSummary | null,
+    timeline: initialTimeline,
     steps: 0,
     completed: false,
     finalAnswer: "",
     compactedContext: "",
-    contextLedger: [],
-    actionFailureStreak: {},
+    contextLedger: initialContextLedger,
+    actionFailureStreak: {} as Record<string, number>,
     noProgressCycles: 0,
     noProgressFallbacks: 0,
     stallCycles: 0,
-    lastOfferedChoiceIndex: null,
-    prefetchedSemanticPromise: null,
-    prefetchedSemanticFingerprint: null,
-    decisionCache: new Map<string, LoopToolCall>(),
-    pageStuckFingerprint: null,
-    pageStuckSince: null,
+    lastOfferedChoiceIndex: null as number | null,
+    decisionCache: {} as Record<string, LoopToolCall>,
+    pageStuckFingerprint: null as string | null,
+    pageStuckSince: null as number | null,
     stepsWhenPageStuck: 0,
-    executedActions: [],
-    triedDestinationUrls: new Set<string>(),
+    executedActions: [] as BrowserAction[],
+    triedDestinationUrls: [] as string[],
     metrics: {
       semanticCalls: 0,
       planCalls: 0,
@@ -903,821 +912,76 @@ export async function runAgentGraph(
       mcpCalls: 0,
       fastPathDecisions: 0,
       planCacheHits: 0,
-      stepDurationsMs: [],
+      stepDurationsMs: [] as number[],
     },
+    toolCall: null as LoopToolCall | null,
+    nextRoute: undefined as string | undefined,
   };
 
-  state.timeline = pushTimeline(
-    state.timeline,
-    "plan",
-    `Goal: ${state.goal.slice(0, 120)}${state.goal.length > 120 ? "…" : ""}`,
-  );
-  state.timeline = pushTimeline(
-    state.timeline,
-    "observe",
-    `Observed ${state.observation.elements.length} actionable elements on ${state.observation.url} (cached verification snapshot)`,
-  );
-  state.contextLedger.push(
-    `observe: ${state.observation.url} (${state.observation.elements.length} elements)`,
-  );
-
+  let finalState: Awaited<ReturnType<typeof graph.invoke>>;
   try {
-    state.availableMcpTools = await deps.listMcpTools();
-    if (state.availableMcpTools.length > 0) {
-      state.timeline = pushTimeline(
-        state.timeline,
-        "plan",
-        `Discovered ${state.availableMcpTools.length} MCP tools.`,
-      );
-      state.contextLedger.push(`mcp_tools: ${state.availableMcpTools.length}`);
-    }
+    finalState = await graph.invoke(initialState, {
+      configurable: { deps, input },
+      signal: input.signal,
+      recursionLimit,
+    });
   } catch (error) {
-    state.timeline = pushTimeline(
-      state.timeline,
-      "plan",
-      "MCP tools unavailable. Continuing with browser-only tools.",
-    );
-    state.contextLedger.push(
-      `mcp_tools_error: ${error instanceof Error ? error.message : "unknown"}`,
-    );
-  }
-
-  let transitions = 0;
-  while (!state.completed && transitions < recursionLimit) {
     if (input.signal?.aborted) {
-      state.completed = true;
-      state.finalAnswer = "Interrupted by user.";
-      state.timeline = pushTimeline(state.timeline, "plan", "Interrupted by user.");
-      break;
-    }
-    const loopStart = Date.now();
-    transitions += 1;
-    try {
-
-    if (state.observationFingerprint !== state.pageStuckFingerprint) {
-      state.pageStuckFingerprint = state.observationFingerprint;
-      state.pageStuckSince = Date.now();
-      state.stepsWhenPageStuck = state.steps;
-    } else if (state.pageStuckSince == null) {
-      state.pageStuckSince = Date.now();
-      state.stepsWhenPageStuck = state.steps;
-    }
-
-    if (detectStuckLoop(state) && deps.canGoBack?.() && deps.goBack) {
-      const fromUrl = state.observation.url;
-      state.timeline = pushTimeline(
-        state.timeline,
-        "plan",
-        `Stuck on same page for ${LOOP_STUCK_MS / 1000}s. Going back.`,
-      );
-      deps.goBack();
-      await new Promise((r) => setTimeout(r, LOOP_GOBACK_WAIT_MS));
-      const observed = await deps.observe();
-      state.observation = observed;
-      state.observationFingerprint = getObservationFingerprint(observed);
-      state.pageStuckFingerprint = state.observationFingerprint;
-      state.pageStuckSince = Date.now();
-      state.stepsWhenPageStuck = state.steps;
-      state.lastSemanticFingerprint = "";
-      state.decisionCache.clear();
-      state.contextLedger.push(`loop_recovery: went back from ${fromUrl} to ${observed.url}`);
-      continue;
-    }
-
-    if (hasStepLimit && state.steps >= deps.maxSteps) {
-      state.completed = true;
-      state.finalAnswer =
-        "Stopped after max steps. Review the summary and continue if needed.";
-      state.timeline = pushTimeline(state.timeline, "plan", "Reached max steps.");
-      break;
-    }
-
-    if (state.completion_point && deps.isAtCompletionPoint) {
-      const atPoint = await deps.isAtCompletionPoint(state.observation, state.completion_point);
-      if (atPoint) {
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `Reached completion point on ${state.observation.url}. Stopping.`,
-        );
-        state.completed = true;
-        state.finalAnswer = `Reached the target: ${state.observation.url}. The page is ready for you to view or download.`;
-        break;
-      }
-    } else if (deps.isGoalAchieved) {
-      const achieved = await deps.isGoalAchieved(state.observation, state.goal);
-      if (achieved) {
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `Goal achieved on ${state.observation.url}. Stopping.`,
-        );
-        state.completed = true;
-        state.finalAnswer = `Found the target on ${state.observation.url}. The page is ready for you to view or download.`;
-        break;
-      }
-    }
-
-    const canReuseSemantic =
-      deps.fastMode &&
-      !!state.observationFingerprint &&
-      state.observationFingerprint === state.lastSemanticFingerprint &&
-      state.availableActions.length > 0;
-
-    if (!canReuseSemantic) {
-      let semantic: PageSummary & { current_step?: string };
-      if (
-        deps.fastMode &&
-        state.prefetchedSemanticPromise &&
-        state.prefetchedSemanticFingerprint === state.observationFingerprint
-      ) {
-        try {
-          semantic = await state.prefetchedSemanticPromise;
-        } catch {
-          state.metrics.semanticCalls += 1;
-          semantic = await deps.semanticInterpreter(state.observation, state.goal, {
-            searchQuery: /google\.com/i.test(state.observation.url) ? state.searchQuery : undefined,
-          });
-        }
-      } else {
-        state.metrics.semanticCalls += 1;
-        semantic = await deps.semanticInterpreter(state.observation, state.goal, {
-          searchQuery: /google\.com/i.test(state.observation.url) ? state.searchQuery : undefined,
-        });
-      }
-      let choices = semantic.choices ?? [];
-      if (
-        state.searchQuery &&
-        /google\.com/i.test(state.observation.url)
-      ) {
-        choices = choices.map((c) => {
-          if (
-            c.actionType === "type" &&
-            c.actionValue &&
-            (c.actionValue.includes("Inferred goal") ||
-              c.actionValue.length > 100)
-          ) {
-            return { ...c, actionValue: state.searchQuery!.slice(0, 120) };
-          }
-          return c;
-        });
-      }
-      state.availableActions = choices;
-      state.currentStep = semantic.current_step ?? state.observation.title;
-      state.summary = semantic;
-      state.lastSemanticFingerprint = state.observationFingerprint;
-      state.prefetchedSemanticPromise = null;
-      state.prefetchedSemanticFingerprint = null;
-      state.contextLedger.push(
-        `semantic: step=${state.currentStep}, choices=${state.availableActions.length}`,
-      );
-    } else {
-      state.contextLedger.push(
-        `semantic: reused for ${state.observation.url} with ${state.availableActions.length} choices`,
-      );
-    }
-
-    state = maybeCompactContext(state);
-
-    let toolCall: LoopToolCall | null = null;
-
-    if (state.noProgressCycles >= 2) {
-      const fallbackAction = getNavigateFallbackAction(state);
-      if (fallbackAction) {
-        toolCall = {
-          kind: "execute_action",
-          action: fallbackAction,
-          source: "no-progress navigate fallback",
-        };
-        state.noProgressFallbacks += 1;
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `No progress for ${state.noProgressCycles} cycles. Trying navigate fallback.`,
-        );
-      }
-    }
-    const decisionKey = getDecisionCacheKey(state);
-
-    if (!toolCall) {
-      const cachedCall = state.decisionCache.get(decisionKey);
-      if (cachedCall) {
-        const shouldSkip = cachedCall.kind === "execute_action";
-        if (!shouldSkip) {
-          toolCall = cachedCall;
-          state.metrics.planCacheHits += 1;
-          const cachedSource =
-            cachedCall.kind === "ask_user" ? cachedCall.reason : cachedCall.source;
-          state.timeline = pushTimeline(
-            state.timeline,
-            "plan",
-            `Plan cache hit: ${cachedSource}`,
-          );
-        }
-      }
-    }
-
-    if (!toolCall && deps.fastMode && state.stallCycles >= 3) {
-      const deterministic = pickDeterministicAction(state);
-      if (deterministic) {
-        toolCall = {
-          kind: "execute_action",
-          action: deterministic.action,
-          source: `stall breaker (${deterministic.source})`,
-          label: deterministic.label,
-          choiceIndex: deterministic.choiceIndex,
-        };
-        state.metrics.fastPathDecisions += 1;
-        if (deterministic.choiceIndex != null) {
-          state.lastOfferedChoiceIndex = deterministic.choiceIndex;
-        }
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `Stall breaker selected ${deterministic.source}${deterministic.label ? ` (${deterministic.label})` : ""}.`,
-        );
-      }
-    }
-
-    // On search results: always pick first organic result from DOM (not semantic choices); go back only when exhausted
-    if (!toolCall && /\/search/i.test(state.observation.url)) {
-      const firstLink = getFirstOrganicLinkFromPage(state);
-      const deterministic = firstLink
-        ? {
-            action: firstLink.action,
-            label: firstLink.label,
-            choiceIndex: undefined as number | undefined,
-            source: "deterministic first search result",
-          }
-        : pickDeterministicAction(state);
-      if (deterministic) {
-        toolCall = {
-          kind: "execute_action",
-          action: deterministic.action,
-          source: deterministic.source,
-          label: deterministic.label,
-          choiceIndex: deterministic.choiceIndex,
-        };
-        state.metrics.fastPathDecisions += 1;
-        if (deterministic.choiceIndex != null) {
-          state.lastOfferedChoiceIndex = deterministic.choiceIndex;
-        }
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `First search result: ${deterministic.label ?? deterministic.source}`,
-        );
-      } else if (deps.canGoBack?.() && deps.goBack) {
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `All search results tried and irrelevant. Going back.`,
-        );
-        deps.goBack();
-        await new Promise((r) => setTimeout(r, LOOP_GOBACK_WAIT_MS));
-        const reobserved = await deps.observe();
-        state.observation = reobserved;
-        state.observationFingerprint = getObservationFingerprint(reobserved);
-        state.lastSemanticFingerprint = "";
-        state.decisionCache.clear();
-        state.contextLedger.push(
-          `search_exhausted: went back from ${state.observation.url}`,
-        );
-        state.timeline = pushTimeline(
-          state.timeline,
-          "observe",
-          `Back at ${reobserved.url}.`,
-        );
-        continue;
-      }
-    }
-
-    if (!toolCall) {
-      const assembledGoal = buildPromptGoal(state, input);
-      state.timeline = pushTimeline(
-        state.timeline,
-        "plan",
-        `Prompt assembled with ${
-          state.availableActions.length + state.availableMcpTools.length
-        } tool options.`,
-      );
-      state.contextLedger.push(
-        `prompt: sidebarTools=${state.availableActions.length}, mcpTools=${state.availableMcpTools.length}, step=${state.currentStep}`,
-      );
-
-      const actionsForPlan = state.availableActions;
-      const planInput: PlanActionInput = {
-        goal: assembledGoal,
-        observation: state.observation,
-        timeline: state.timeline,
-        availableActions: actionsForPlan,
-        availableMcpTools: state.availableMcpTools,
-        currentStep: state.currentStep,
-        planSteps: state.planSteps,
-        planStepIndex: state.planStepIndex,
+      _activeOnEvent = undefined;
+      return {
+        completed: true,
+        finalAnswer: "Interrupted by user.",
+        finalSummary: {
+          summary: "No summary available.",
+          purpose: "Unknown",
+          choices: [],
+        },
+        timeline: initialTimeline.concat([
+          {
+            ts: new Date().toISOString(),
+            kind: "plan",
+            message: "Interrupted by user.",
+          },
+        ]),
       };
-
-      state.metrics.planCalls += 1;
-      const plan = await deps.plan(planInput);
-      if (plan.done) {
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `${plan.reasoning} (confidence ${plan.confidence.toFixed(2)})`,
-        );
-        state.contextLedger.push(
-          `assistant: done (confidence=${plan.confidence.toFixed(2)})`,
-        );
-        state.completed = true;
-        state.finalAnswer = plan.finalAnswer;
-        break;
-      }
-
-      toolCall = resolveToolCallFromPlan(
-        plan,
-        actionsForPlan,
-        state.availableMcpTools,
-      );
-      if (toolCall.kind === "execute_mcp") {
-        state.decisionCache.set(decisionKey, toolCall);
-      }
-      if (toolCall.kind === "execute_action" && toolCall.choiceIndex != null) {
-        state.lastOfferedChoiceIndex = toolCall.choiceIndex;
-      }
-
-      if (toolCall.kind === "execute_action" || toolCall.kind === "execute_mcp") {
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `${plan.reasoning} -> ${toolCall.source}${
-            toolCall.kind === "execute_action" && toolCall.label
-              ? ` (${toolCall.label})`
-              : ""
-          } (confidence ${plan.confidence.toFixed(2)})`,
-        );
-      }
     }
-
-    if (toolCall.kind === "ask_user") {
-      if (toolCall.reason !== "planner_ask") {
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `${toolCall.question} Replanning automatically.`,
-        );
-        state.contextLedger.push(`planner_feedback: ${toolCall.reason}`);
-        state.goal = `${state.goal}\nPlanner correction: ${toolCall.question}`;
-        state.stallCycles += 1;
-        continue;
-      }
-
-      const base = shortQuestion(toolCall.question);
-      const expectsText = isConfirmationQuestion(toolCall.question);
-      const question =
-        expectsText
-          ? `${base} (Enter=skip)`
-          : state.availableActions.length > 0
-            ? `${base} Option? 1-${state.availableActions.length} (Enter=skip)`
-            : `${base} (Enter=skip)`;
-
-      let interpretedChoice: number | null = null;
-      let skipped = false;
-      let clarificationText: string | null = null;
-
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        state.timeline = pushTimeline(state.timeline, "question", question);
-        const answer = await deps.askUser(question);
-        const trimmed = (answer ?? "").trim();
-
-        if (!trimmed) {
-          skipped = true;
-          state.timeline = pushTimeline(
-            state.timeline,
-            "user",
-            "User skipped question. Re-evaluating best option.",
-          );
-          break;
-        }
-
-        state.timeline = pushTimeline(state.timeline, "user", `User clarification: ${trimmed}`);
-
-        const choiceIndex = findChoiceIndexFromAnswer(
-          trimmed,
-          state.availableActions,
-          state.lastOfferedChoiceIndex,
-        );
-
-        if (choiceIndex != null) {
-          interpretedChoice = choiceIndex;
-          break;
-        }
-
-        if (expectsText) {
-          clarificationText = trimmed;
-          break;
-        }
-
-        if (state.availableActions.length > 0) {
-          const reprompt = `Number only: 1-${state.availableActions.length} (Enter=skip)`;
-          state.timeline = pushTimeline(state.timeline, "question", reprompt);
-          const answer2 = await deps.askUser(reprompt);
-          const trimmed2 = (answer2 ?? "").trim();
-          if (!trimmed2) {
-            skipped = true;
-            state.timeline = pushTimeline(
-              state.timeline,
-              "user",
-              "User skipped question. Re-evaluating best option.",
-            );
-            break;
-          }
-          state.timeline = pushTimeline(state.timeline, "user", `User clarification: ${trimmed2}`);
-          const choiceIndex2 = findChoiceIndexFromAnswer(
-            trimmed2,
-            state.availableActions,
-            state.lastOfferedChoiceIndex,
-          );
-          if (choiceIndex2 != null) {
-            interpretedChoice = choiceIndex2;
-            break;
-          }
-          clarificationText = trimmed2;
-          continue;
-        }
-
-        clarificationText = trimmed;
-      }
-
-      if (interpretedChoice != null) {
-        const selected = state.availableActions[interpretedChoice - 1];
-        const selectedAction = selected ? choiceToAction(selected) : null;
-        if (selectedAction) {
-          toolCall = {
-            kind: "execute_action",
-            action: selectedAction,
-            source: `user selected option ${interpretedChoice}`,
-            label: selected?.label,
-            choiceIndex: interpretedChoice,
-          };
-          state.lastOfferedChoiceIndex = interpretedChoice;
-          state.goal = `${state.goal}\nUser selected option ${interpretedChoice}.`;
-          state.stallCycles = 0;
-        } else {
-          state.goal = `${state.goal}\nUser selected non-executable option ${interpretedChoice}.`;
-          state.stallCycles += 1;
-          continue;
-        }
-      } else if (skipped) {
-        state.goal = `${state.goal}\nUser skipped clarification. Choose best next option.`;
-        state.contextLedger.push("user: skipped clarification");
-        state.stallCycles += 1;
-        continue;
-      } else {
-        if (clarificationText) {
-          state.goal = `${state.goal}\nUser clarification: ${clarificationText}`;
-          state.contextLedger.push(`user: ${clarificationText}`);
-          state.decisionCache.clear();
-          state.stallCycles = 0;
-        } else {
-          state.stallCycles += 1;
-        }
-        continue;
-      }
-    }
-
-    if (toolCall.kind === "execute_mcp") {
-      const toolLabel = `${toolCall.call.server}/${toolCall.call.name}`;
-      state.contextLedger.push(`tool_call: execute_mcp ${toolLabel}`);
-      try {
-        state.metrics.mcpCalls += 1;
-        const result = await withTimeout(
-          deps.callMcpTool(toolCall.call),
-          deps.actionTimeoutMs,
-          `MCP tool timed out after ${deps.actionTimeoutMs}ms`,
-        );
-        state.timeline = pushTimeline(
-          state.timeline,
-          "act",
-          `MCP ${toolLabel}: ${result.ok ? "ok" : "failed"}`,
-        );
-        const snippet = result.content.slice(0, 1200);
-        state.contextLedger.push(
-          `tool_result: mcp ${result.ok ? "success" : "failure"} ${toolLabel} ${snippet}`,
-        );
-        if (!result.ok || result.isError) {
-          state.goal = `${state.goal}\nMCP tool ${toolLabel} failed: ${snippet}`;
-          continue;
-        }
-        state.steps += 1;
-        state.stallCycles = 0;
-        state.goal = `${state.goal}\nMCP result (${toolLabel}): ${snippet}`;
-        continue;
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : `MCP tool ${toolLabel} failed`;
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `${message}. Replanning automatically.`,
-        );
-        state.contextLedger.push(`tool_result: mcp_error ${toolLabel} ${message}`);
-        state.goal = `${state.goal}\nMCP error (${toolLabel}): ${message}`;
-        state.stallCycles += 1;
-        continue;
-      }
-    }
-
-    const action = toolCall.action;
-    const signature = getActionSignature(action);
-    const actionDesc = describeAction(action);
-    state.contextLedger.push(`tool_call: execute_action ${actionDesc}`);
-
-    if (deps.enableSafetyGuardrails) {
-      state.metrics.safetyCalls += 1;
-      const validation = await deps.safetySupervisor(state.goal, action, {
-        url: state.observation.url,
-        currentStep: state.currentStep,
-      });
-
-      if (!validation.approved) {
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `Guardrails rejected action: ${validation.reason}. Replanning automatically.`,
-        );
-        state.decisionCache.clear();
-        state.contextLedger.push(`tool_result: guardrails_reject ${validation.reason}`);
-        state.goal = `${state.goal}\nSafety feedback: ${validation.reason}`;
-        state.stallCycles += 1;
-        continue;
-      }
-
-      if (
-        deps.requireApprovalForRiskyActions &&
-        (validation.requiresHITL || deps.isRiskyForHITL(action))
-      ) {
-        const confirmQuestion = `Confirm ${actionDesc}? yes/no (Enter=skip)`;
-        state.timeline = pushTimeline(state.timeline, "question", confirmQuestion);
-        const confirmAnswer = await deps.askUser(confirmQuestion);
-        if (!confirmAnswer || !/^\s*yes\s*$/i.test(confirmAnswer)) {
-          state.timeline = pushTimeline(
-            state.timeline,
-            "user",
-            "User declined/skip. Re-evaluating best option.",
-          );
-          state.decisionCache.clear();
-          state.contextLedger.push("tool_result: hitl_declined_or_skipped");
-          state.stallCycles += 1;
-          continue;
-        }
-        state.timeline = pushTimeline(state.timeline, "user", "User confirmed action.");
-        state.contextLedger.push("tool_result: hitl_confirmed");
-      }
-    } else {
-      state.contextLedger.push("tool_result: guardrails_disabled");
-    }
-
-    const exec = await executeActionWithRetries(deps, action, state.timeline);
-    state.timeline = exec.timeline;
-
-    if (!exec.ok) {
-      const nextStreak = (state.actionFailureStreak[signature] ?? 0) + 1;
-      state.actionFailureStreak[signature] = nextStreak;
-
-      if (exec.reason === "target_not_found") {
-        state.decisionCache.clear();
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          "Target missing. Refreshing observation and semantic options immediately.",
-        );
-        state = await refreshObservationAndSemantic(deps, state, "after target not found");
-        state.contextLedger.push(`tool_result: failed_target_not_found ${exec.lastMessage}`);
-        state.stallCycles += 1;
-        continue;
-      }
-
-      state.timeline = pushTimeline(
-        state.timeline,
-        "plan",
-        `Action failed after ${deps.maxRetriesPerStep + 1} attempts. Replanning automatically.`,
-      );
-      state.decisionCache.clear();
-      state.contextLedger.push(`tool_result: failed ${exec.lastMessage}`);
-      state.goal = `${state.goal}\nTool error: ${exec.lastMessage}`;
-      state.stallCycles += 1;
-      continue;
-    }
-
-    state.actionFailureStreak[signature] = 0;
-    state.decisionCache.clear();
-    state.steps += 1;
-    state.stallCycles = 0;
-    state.executedActions = [...state.executedActions, action];
-    state.contextLedger.push(`tool_result: success ${exec.lastMessage}`);
-
-    try {
-      const prevFingerprint = state.observationFingerprint;
-      let observed = await withTimeout(
-        deps.observe(),
-        deps.verifyTimeoutMs,
-        `Verification timed out after ${deps.verifyTimeoutMs}ms`,
-      );
-      let nextFingerprint = getObservationFingerprint(observed);
-      if (nextFingerprint === prevFingerprint && (action.type === "type" || action.type === "navigate")) {
-        await new Promise((r) => setTimeout(r, 2000));
-        observed = await withTimeout(
-          deps.observe(),
-          deps.verifyTimeoutMs,
-          `Verification timed out after ${deps.verifyTimeoutMs}ms`,
-        );
-        nextFingerprint = getObservationFingerprint(observed);
-      }
-      state.noProgressCycles = nextFingerprint === prevFingerprint ? state.noProgressCycles + 1 : 0;
-      state.observation = observed;
-      state.observationFingerprint = nextFingerprint;
-      if (
-        nextFingerprint !== prevFingerprint &&
-        state.planSteps.length > 0 &&
-        state.planStepIndex < state.planSteps.length - 1
-      ) {
-        state.planStepIndex += 1;
-        state.contextLedger.push(
-          `plan_advance: step ${state.planStepIndex + 1}/${state.planSteps.length} (${state.planSteps[state.planStepIndex]?.slice(0, 60)}…)`,
-        );
-      }
-      state.timeline = pushTimeline(
-        state.timeline,
-        "observe",
-        `Observed ${observed.elements.length} actionable elements on ${observed.url} (post-action verification)`,
-      );
-      if (state.noProgressCycles >= 2) {
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `No progress detected for ${state.noProgressCycles} cycles.`,
-        );
-      }
-      state.contextLedger.push(
-        `observe: ${observed.url} (${observed.elements.length} elements, noProgress=${state.noProgressCycles})`,
-      );
-
-      if (
-        nextFingerprint !== prevFingerprint &&
-        (action.type === "navigate" || action.type === "click") &&
-        deps.isPageRelevantToGoal &&
-        deps.canGoBack?.() &&
-        deps.goBack
-      ) {
-        // Wait 5s for page to load before judging relevance (don't be eager to go back)
-        await new Promise((r) => setTimeout(r, 5000));
-        observed = await withTimeout(
-          deps.observe(),
-          deps.verifyTimeoutMs,
-          `Relevance check observe timed out`,
-        );
-        state.observation = observed;
-        state.observationFingerprint = getObservationFingerprint(observed);
-        const relevant = await deps.isPageRelevantToGoal(observed, state.goal, {
-          planSteps: state.planSteps,
-          planStepIndex: state.planStepIndex,
-        });
-        if (!relevant) {
-          state.triedDestinationUrls.add(normalizeUrlForTried(observed.url));
-          state.timeline = pushTimeline(
-            state.timeline,
-            "plan",
-            `Page not relevant to goal. Going back to try a different option.`,
-          );
-          deps.goBack();
-          await new Promise((r) => setTimeout(r, LOOP_GOBACK_WAIT_MS));
-          const reobserved = await deps.observe();
-          state.observation = reobserved;
-          state.observationFingerprint = getObservationFingerprint(reobserved);
-          state.lastSemanticFingerprint = "";
-          state.decisionCache.clear();
-          state.contextLedger.push(
-            `page_relevance: went back from irrelevant ${observed.url}`,
-          );
-          state.timeline = pushTimeline(
-            state.timeline,
-            "observe",
-            `Back at ${reobserved.url}. Trying a different option.`,
-          );
-          continue;
-        }
-      }
-
-      if (state.completion_point && deps.isAtCompletionPoint) {
-        const atPoint = await deps.isAtCompletionPoint(state.observation, state.completion_point);
-        if (atPoint) {
-          state.timeline = pushTimeline(
-            state.timeline,
-            "plan",
-            `Reached completion point on ${state.observation.url}. Stopping.`,
-          );
-          state.completed = true;
-          state.finalAnswer = `Reached the target: ${state.observation.url}. The page is ready for you to view or download.`;
-          break;
-        }
-      } else if (deps.isGoalAchieved) {
-        const achieved = await deps.isGoalAchieved(state.observation, state.goal);
-        if (achieved) {
-          state.timeline = pushTimeline(
-            state.timeline,
-            "plan",
-            `Goal achieved on ${state.observation.url}. Stopping.`,
-          );
-          state.completed = true;
-          state.finalAnswer = `Found the target on ${state.observation.url}. The page is ready for you to view or download.`;
-          break;
-        }
-      }
-
-      if (deps.fastMode && nextFingerprint !== state.lastSemanticFingerprint) {
-        const goalSnapshot = state.goal;
-        state.prefetchedSemanticFingerprint = nextFingerprint;
-        state.metrics.semanticCalls += 1;
-        state.prefetchedSemanticPromise = deps
-          .semanticInterpreter(observed, goalSnapshot, {
-            searchQuery: /google\.com/i.test(observed.url) ? state.searchQuery : undefined,
-          })
-          .catch((error) => {
-            logRenderer("agentGraph", "prefetch semantic failed", {
-              error: error instanceof Error ? error.message : String(error),
-            });
-            return (
-              state.summary ?? {
-                summary: "No summary available.",
-                purpose: "Unknown",
-                choices: [],
-              }
-            );
-          });
-      } else {
-        state.prefetchedSemanticFingerprint = null;
-        state.prefetchedSemanticPromise = null;
-      }
-    } catch (error) {
-      state.timeline = pushTimeline(
-        state.timeline,
-        "plan",
-        error instanceof Error
-          ? `${error.message}. Replanning automatically.`
-          : "Verification failed or timed out. Replanning automatically.",
-      );
-      state.contextLedger.push(
-        `verify_error: ${error instanceof Error ? error.message : "unknown"}`,
-      );
-      state.stallCycles += 1;
-    }
-    } finally {
-      state.metrics.stepDurationsMs.push(Date.now() - loopStart);
-    }
+    throw error;
   }
 
-  if (!state.completed && transitions >= recursionLimit) {
-    state.completed = true;
-    state.finalAnswer =
-      "Recursion limit reached without hitting a stop condition. Increase max steps or refine the goal.";
-    state.timeline = pushTimeline(
-      state.timeline,
-      "error",
-      "Recursion limit reached before completion.",
-    );
-  }
+  const state = finalState as typeof initialState & {
+    completed?: boolean;
+    finalAnswer?: string;
+    timeline?: AgentTimelineEvent[];
+    summary?: PageSummary | null;
+    executedActions?: BrowserAction[];
+  };
 
-  const totalDuration = state.metrics.stepDurationsMs.reduce((sum, value) => sum + value, 0);
+  const totalDuration = (state.metrics?.stepDurationsMs ?? []).reduce(
+    (sum: number, value: number) => sum + value,
+    0,
+  );
+  const stepDurations = state.metrics?.stepDurationsMs ?? [];
   const avgStepMs =
-    state.metrics.stepDurationsMs.length > 0
-      ? Math.round(totalDuration / state.metrics.stepDurationsMs.length)
-      : 0;
-  const p50StepMs = Math.round(percentile(state.metrics.stepDurationsMs, 50));
-  const p95StepMs = Math.round(percentile(state.metrics.stepDurationsMs, 95));
-  const perfSummary = `Perf: avgStep=${avgStepMs}ms p50=${p50StepMs}ms p95=${p95StepMs}ms semantic=${state.metrics.semanticCalls} plan=${state.metrics.planCalls} safety=${state.metrics.safetyCalls} mcp=${state.metrics.mcpCalls} fastPath=${state.metrics.fastPathDecisions} planCacheHits=${state.metrics.planCacheHits}`;
-  state.timeline = pushTimeline(state.timeline, "summary", perfSummary);
+    stepDurations.length > 0 ? Math.round(totalDuration / stepDurations.length) : 0;
+  const p50StepMs = Math.round(percentile(stepDurations, 50));
+  const p95StepMs = Math.round(percentile(stepDurations, 95));
+  const perfSummary = `Perf: avgStep=${avgStepMs}ms p50=${p50StepMs}ms p95=${p95StepMs}ms semantic=${state.metrics?.semanticCalls ?? 0} plan=${state.metrics?.planCalls ?? 0} safety=${state.metrics?.safetyCalls ?? 0} mcp=${state.metrics?.mcpCalls ?? 0} fastPath=${state.metrics?.fastPathDecisions ?? 0} planCacheHits=${state.metrics?.planCacheHits ?? 0}`;
+  const finalTimeline = pushTimeline(
+    state.timeline ?? initialTimeline,
+    "summary",
+    perfSummary,
+  );
 
   logRenderer("agentGraph", "runAgentGraph done", {
     completed: state.completed,
-    timelineLen: state.timeline.length,
-    transitions,
-    metrics: {
-      avgStepMs,
-      p50StepMs,
-      p95StepMs,
-      semanticCalls: state.metrics.semanticCalls,
-      planCalls: state.metrics.planCalls,
-      safetyCalls: state.metrics.safetyCalls,
-      mcpCalls: state.metrics.mcpCalls,
-      fastPathDecisions: state.metrics.fastPathDecisions,
-      planCacheHits: state.metrics.planCacheHits,
-    },
+    timelineLen: finalTimeline.length,
+    metrics: state.metrics,
   });
 
   _activeOnEvent = undefined;
 
   return {
-    completed: state.completed,
+    completed: state.completed ?? false,
     finalAnswer:
       state.finalAnswer || "Task ended. Review the simplified summary in the sidebar.",
     finalSummary:
@@ -1726,7 +990,7 @@ export async function runAgentGraph(
         purpose: "Unknown",
         choices: [],
       },
-    timeline: state.timeline,
-    executedActions: state.executedActions,
+    timeline: finalTimeline,
+    executedActions: state.executedActions ?? [],
   };
 }
