@@ -220,11 +220,12 @@ function extractBalancedJsonObject(text: string): string | null {
 function tryRepairTruncatedJson(text: string): string | null {
   const start = text.indexOf("{");
   if (start < 0) return null;
-  const fragment = text.slice(start);
+  let fragment = text.slice(start);
   let braceDepth = 0;
   let bracketDepth = 0;
   let inString = false;
   let escaped = false;
+  let lastCompleteEnd = -1;
   for (let i = 0; i < fragment.length; i += 1) {
     const ch = fragment[i];
     if (inString) {
@@ -238,10 +239,32 @@ function tryRepairTruncatedJson(text: string): string | null {
       continue;
     }
     if (ch === "{") braceDepth += 1;
-    if (ch === "}") braceDepth -= 1;
+    if (ch === "}") {
+      braceDepth -= 1;
+      if (braceDepth === 0) lastCompleteEnd = i + 1;
+    }
     if (ch === "[") bracketDepth += 1;
     if (ch === "]") bracketDepth -= 1;
   }
+  // If truncated inside a string, truncate back to last complete key-value and close
+  if (inString && lastCompleteEnd < 0) {
+    const patterns = ['",', "null,", "},", "],"];
+    for (const p of patterns) {
+      const idx = fragment.lastIndexOf(p);
+      if (idx >= 0) {
+        const cut = fragment.slice(0, idx + p.length - 1);
+        try {
+          const closed = cut + "}";
+          JSON.parse(closed);
+          return closed;
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+  // Remove trailing comma before closing (invalid in JSON)
+  fragment = fragment.replace(/,\s*$/, "");
   const repaired = fragment + "]".repeat(Math.max(0, bracketDepth)) + "}".repeat(Math.max(0, braceDepth));
   try {
     JSON.parse(repaired);
@@ -319,6 +342,46 @@ function buildContentParts(prompt: string): Array<{ type: "text"; text: string }
   return [{ type: "text", text: prompt }];
 }
 
+/** vLLM structured JSON schema for inferIntent. Enforces output shape and blocks extra fields. */
+const INFER_INTENT_JSON_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    prompt_type: {
+      type: "string" as const,
+      enum: ["conversational", "task"],
+      description: "conversational = chat reply; task = agent performs actions",
+    },
+    inferredGoal: { type: "string" as const, description: "Clear actionable goal" },
+    plan: { type: "string" as const, description: "Numbered step-by-step plan" },
+    planSteps: {
+      type: "array" as const,
+      items: { type: "string" as const },
+      description: "Detailed step strings",
+    },
+    completion_point: { type: "string" as const, description: "Final state when done" },
+    searchQuery: {
+      type: ["string", "null"] as const,
+      description: "Short query for first search, or null if no search needed",
+    },
+    clarifyingQuestion: { type: "string" as const, description: "Question if ambiguous" },
+    choices: {
+      type: "array" as const,
+      items: {
+        type: "object" as const,
+        properties: {
+          label: { type: "string" as const },
+          goal: { type: "string" as const },
+        },
+        required: ["label", "goal"],
+        additionalProperties: false,
+      },
+      description: "Alternative interpretations",
+    },
+  },
+  required: ["prompt_type", "inferredGoal", "plan", "planSteps", "completion_point"],
+  additionalProperties: false,
+};
+
 async function chatCompletion(
   model: string,
   content: Array<{ type: "text"; text: string }>,
@@ -326,18 +389,36 @@ async function chatCompletion(
     maxTokens?: number;
     temperature?: number;
     jsonMode?: boolean;
+    /** vLLM structured output: strict JSON schema. Takes precedence over jsonMode. */
+    jsonSchema?: { name: string; schema: object };
     disableThinking?: boolean;
   },
 ): Promise<string> {
+  const responseFormat = opts?.jsonSchema
+    ? {
+        type: "json_schema" as const,
+        json_schema: {
+          name: opts.jsonSchema.name,
+          strict: true,
+          schema: opts.jsonSchema.schema,
+        },
+      }
+    : opts?.jsonMode
+      ? { type: "json_object" as const }
+      : undefined;
+
+  const extraBody: Record<string, unknown> = {};
+  if (opts?.disableThinking) {
+    extraBody.chat_template_kwargs = { enable_thinking: false };
+  }
+
   const completion = await client.chat.completions.create({
     model,
     messages: [{ role: "user", content }],
     max_tokens: opts?.maxTokens,
     temperature: opts?.temperature ?? 0.1,
-    response_format: opts?.jsonMode ? { type: "json_object" } : undefined,
-    extra_body: opts?.disableThinking
-      ? { chat_template_kwargs: { enable_thinking: false } }
-      : undefined,
+    response_format: responseFormat,
+    extra_body: Object.keys(extraBody).length > 0 ? extraBody : undefined,
   });
   return completion.choices[0]?.message?.content ?? "";
 }
@@ -395,6 +476,12 @@ async function withMemo<T>(
 }
 
 const intentSchema = z.object({
+  /** "conversational" = user wants a chat reply (questions, explanations). "task" = user wants agent to perform actions (search, navigate, fill forms). */
+  prompt_type: z
+    .enum(["conversational", "task"])
+    .optional()
+    .default("task")
+    .transform((v) => (v === "conversational" ? "conversational" : "task")),
   inferredGoal: z.string(),
   plan: z.string(),
   planSteps: z
@@ -403,7 +490,10 @@ const intentSchema = z.object({
     .transform((v) => v?.filter((s) => s.trim().length > 0) ?? []),
   /** Final state the agent should achieve. Used to detect when to stop. */
   completion_point: z.string().optional(),
-  searchQuery: z.string().optional(),
+  searchQuery: z
+    .union([z.string(), z.null()])
+    .optional()
+    .transform((v) => (v == null || v === "" ? undefined : v)),
   clarifyingQuestion: z
     .union([z.string(), z.null(), z.undefined()])
     .optional()
@@ -427,7 +517,10 @@ export async function inferIntent(rawGoal: string): Promise<InferIntentResult> {
   const prompt = `You are an intent inference system. For the user's raw message, think deeply and thoroughly about what they actually want to do.
 Resolve ambiguities, infer context, and produce a clear operational goal plus a step-by-step plan.
 
-Return ONLY a JSON object with:
+CRITICAL: Return ONLY the keys listed below. Do NOT add error, response, features, timestamp, metadata, or any other fields.
+
+Return a JSON object with EXACTLY these keys:
+- prompt_type: "conversational" or "task". Use "conversational" when the user wants a chat reply—questions, explanations, general discussion, opinions, definitions, how-to advice without doing it. Use "task" when the user wants the agent to perform actions—search the web, navigate, fill forms, click, download, book, etc.
 - inferredGoal: A clear, actionable goal statement (what the user wants to achieve)
 - plan: A numbered step-by-step plan (what to do first, second, etc.). Be specific. Include search terms, sites, or actions when inferable.
 - planSteps: Array of DETAILED step strings, one per step. Each step must be a single actionable task the agent can execute. Include the TARGET we're looking for (e.g. "Click IRS.gov link in search results", "Find and click Form 1040-SR PDF link on page", "Download PDF from form page"). Be specific about what to look for on each page.
@@ -437,17 +530,21 @@ Return ONLY a JSON object with:
 - choices: (optional) Array of 0-3 alternative interpretations when ambiguous. Each: { "label": "Short button label", "goal": "Full goal for this option" }
 
 Examples:
-- "download IRS Form 1040-SR" -> inferredGoal: "Find and download IRS Form 1040-SR", plan: "1. Search for Form 1040-SR 2. Click IRS link 3. Download PDF", planSteps: ["Search for Form 1040-SR on Google", "Click IRS.gov or official tax form link in search results", "On form page: find and click Form 1040-SR PDF download link", "Download or open the PDF"], completion_point: "IRS Form 1040-SR PDF page visible or downloadable on irs.gov", searchQuery: "IRS Form 1040-SR PDF"
-- "i wanna see a movie" -> inferredGoal: "Find movie recommendations", plan: "1. Search for movie recommendations 2. Present options", completion_point: "Movie recommendations or showtimes displayed", searchQuery: "movie recommendations"
-- "book flight to tokyo" -> inferredGoal: "Book a flight to Tokyo", plan: "1. Navigate to flight search 2. Enter Tokyo 3. Select dates 4. Search", completion_point: "Flight search results with Tokyo as destination", searchQuery: "flights to Tokyo"
+- "what is IRS Form 1040-SR?" -> prompt_type: "conversational", inferredGoal: "Explain IRS Form 1040-SR", plan: "Answer the question directly"
+- "download IRS Form 1040-SR" -> prompt_type: "task", inferredGoal: "Find and download IRS Form 1040-SR", plan: "1. Search for Form 1040-SR 2. Click IRS link 3. Download PDF", planSteps: ["Search for Form 1040-SR on Google", "Click IRS.gov or official tax form link in search results", "On form page: find and click Form 1040-SR PDF download link", "Download or open the PDF"], completion_point: "IRS Form 1040-SR PDF page visible or downloadable on irs.gov", searchQuery: "IRS Form 1040-SR PDF"
+- "i wanna see a movie" -> prompt_type: "task", inferredGoal: "Find movie recommendations", plan: "1. Search for movie recommendations 2. Present options", completion_point: "Movie recommendations or showtimes displayed", searchQuery: "movie recommendations"
+- "book flight to tokyo" -> prompt_type: "task", inferredGoal: "Book a flight to Tokyo", plan: "1. Navigate to flight search 2. Enter Tokyo 3. Select dates 4. Search", completion_point: "Flight search results with Tokyo as destination", searchQuery: "flights to Tokyo"
 
 User message:
 ${rawGoal}`;
 
   const content = buildContentParts(prompt);
   const text = await chatCompletion(model, content, {
-    maxTokens: 520,
-    jsonMode: true,
+    maxTokens: 1200,
+    jsonSchema: {
+      name: "infer_intent",
+      schema: INFER_INTENT_JSON_SCHEMA,
+    },
   });
   logModelResponse("inferIntent raw response", text, 400);
   const parsed = intentSchema.parse(extractJson(text));
@@ -458,12 +555,34 @@ ${rawGoal}`;
       .filter((s) => s.length > 0);
   }
   logMain("llm", "inferIntent done", {
+    prompt_type: parsed.prompt_type,
     inferredGoalLen: parsed.inferredGoal.length,
     planLen: parsed.plan.length,
     planSteps: parsed.planSteps?.length ?? 0,
     choices: parsed.choices?.length ?? 0,
   });
   return parsed;
+}
+
+/** Generate a conversational reply when the user asks a question or wants discussion (no task execution). */
+export async function respondConversationally(userMessage: string): Promise<string> {
+  logMain("llm", "respondConversationally start", { userMessageLen: userMessage.length });
+  const model = config.summarizerModel;
+  const prompt = `You are a helpful assistant. The user has asked a conversational question or wants a discussion—they do NOT want you to search the web or perform browser actions.
+
+Respond helpfully, concisely, and directly. Be informative but keep the response focused. If the question is ambiguous, you may ask a brief clarifying question.
+
+User message:
+${userMessage}`;
+
+  const content = buildContentParts(prompt);
+  const text = await chatCompletion(model, content, {
+    maxTokens: 1024,
+    temperature: 0.3,
+  });
+  const reply = stripThinkTags(text ?? "").trim();
+  logMain("llm", "respondConversationally done", { replyLen: reply.length });
+  return reply || "I'm not sure how to respond to that. Could you rephrase?";
 }
 
 /** Semantic Interpreter ("Eyes"): Raw DOM -> simplified JSON schema of top actions for user_goal */

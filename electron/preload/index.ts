@@ -11,6 +11,8 @@ const api = {
   summarizePage: (observation: PageObservation) =>
     ipcRenderer.invoke("llm:summarizePage", observation),
   inferIntent: (rawGoal: string) => ipcRenderer.invoke("llm:inferIntent", rawGoal),
+  respondConversationally: (userMessage: string) =>
+    ipcRenderer.invoke("llm:respondConversationally", userMessage),
   semanticInterpreter: (
     observation: PageObservation,
     userGoal: string,

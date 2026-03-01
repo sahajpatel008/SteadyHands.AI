@@ -512,9 +512,11 @@ export default function App() {
     }
 
     setIntentInferring(true);
+    const userMessage = goal;
     setGoal("");
     try {
-      const result = (await window.steadyhands.inferIntent(goal)) as {
+      const result = (await window.steadyhands.inferIntent(userMessage)) as {
+        prompt_type?: "conversational" | "task";
         inferredGoal: string;
         plan: string;
         planSteps?: string[];
@@ -523,6 +525,14 @@ export default function App() {
         clarifyingQuestion?: string;
         choices: Array<{ label: string; goal: string }>;
       };
+
+      if (result.prompt_type === "conversational") {
+        const reply = await window.steadyhands.respondConversationally(userMessage);
+        pushChat("agent", reply);
+        setIntentInferring(false);
+        return;
+      }
+
       const msg = [
         `I inferred: ${result.inferredGoal}`,
         ``,
@@ -540,7 +550,7 @@ export default function App() {
         searchQuery: result.searchQuery,
         clarifyingQuestion: result.clarifyingQuestion,
         choices: result.choices ?? [],
-        rawGoal: goal,
+        rawGoal: userMessage,
       });
     } catch (error) {
       logRenderer("App", "inferIntent failed", { error: String(error) });
@@ -601,13 +611,24 @@ export default function App() {
     setIntentInferring(true);
     try {
       const result = (await window.steadyhands.inferIntent(refinement)) as {
+        prompt_type?: "conversational" | "task";
         inferredGoal: string;
         plan: string;
         planSteps?: string[];
+        completion_point?: string;
         searchQuery?: string;
         clarifyingQuestion?: string;
         choices: Array<{ label: string; goal: string }>;
       };
+
+      if (result.prompt_type === "conversational") {
+        const reply = await window.steadyhands.respondConversationally(refinement);
+        pushChat("agent", reply);
+        setPendingIntentConfirmation(null);
+        setIntentInferring(false);
+        return;
+      }
+
       const msg = [
         `I inferred: ${result.inferredGoal}`,
         ``,

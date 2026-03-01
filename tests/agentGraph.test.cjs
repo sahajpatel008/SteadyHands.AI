@@ -60,6 +60,7 @@ function makeSummaryWithChoices(summaryText, choices) {
 function baseDeps(overrides = {}) {
   return {
     inferIntent: async (rawGoal) => ({
+      prompt_type: "task",
       inferredGoal: rawGoal,
       plan: "1. Complete the task",
       planSteps: ["Complete the task"],

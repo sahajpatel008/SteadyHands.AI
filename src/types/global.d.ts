@@ -34,11 +34,13 @@ declare global {
       }>;
       summarizePage: (observation: PageObservation) => Promise<unknown>;
       inferIntent: (rawGoal: string) => Promise<{
+        prompt_type?: "conversational" | "task";
         inferredGoal: string;
         plan: string;
         clarifyingQuestion?: string;
         choices: Array<{ label: string; goal: string }>;
       }>;
+      respondConversationally: (userMessage: string) => Promise<string>;
       semanticInterpreter: (
         observation: PageObservation,
         userGoal: string,

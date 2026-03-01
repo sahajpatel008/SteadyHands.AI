@@ -10,6 +10,7 @@ import {
   isGoalAchieved,
   isPageRelevantToGoal,
   planAction,
+  respondConversationally,
   summarizePage,
   safetySupervisor,
   semanticInterpreter,
@@ -89,6 +90,13 @@ function setupIpcHandlers() {
     logMain("ipc", "llm:inferIntent called", { rawGoalLen: rawGoal?.length });
     const result = await inferIntent(rawGoal);
     logMain("ipc", "llm:inferIntent done");
+    return result;
+  });
+
+  ipcMain.handle("llm:respondConversationally", async (_, userMessage: string) => {
+    logMain("ipc", "llm:respondConversationally called", { userMessageLen: userMessage?.length });
+    const result = await respondConversationally(userMessage);
+    logMain("ipc", "llm:respondConversationally done");
     return result;
   });
 
