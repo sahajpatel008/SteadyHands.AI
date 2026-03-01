@@ -740,6 +740,28 @@ body {
   animation: micPulse 1s ease-in-out infinite;
 }
 
+.micBtn--transcribing {
+  background: #e8f4f1;
+  border-color: var(--accent);
+  color: var(--accent);
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+@keyframes micTranscribeSpin {
+  to { transform: rotate(360deg); }
+}
+
+.micTranscribeSpinner {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border: 3px solid rgba(0, 77, 64, 0.2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: micTranscribeSpin 0.75s linear infinite;
+}
+
 @keyframes micPulse {
   0%, 100% { transform: scale(1); }
   50%       { transform: scale(1.05); }

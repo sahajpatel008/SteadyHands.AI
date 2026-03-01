@@ -211,6 +211,7 @@ export function AssistantPanel({
 
   // Determine what textarea and primary action to show
   const isBusy = running || intentInferring || isTranscribing;
+  const isAgentBusy = running || intentInferring; // excludes transcription
   const latestActivity = timeline.length > 0 ? timeline[timeline.length - 1] : null;
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -327,7 +328,7 @@ export function AssistantPanel({
         ) : null}
 
         {/* Thinking collapsible — groups all reasoning steps */}
-        {(isBusy || timeline.length > 0) ? (
+        {(isAgentBusy || timeline.length > 0) ? (
           <div className="thinkingCollapsible">
             <button
               className="thinkingHeader"
@@ -336,7 +337,7 @@ export function AssistantPanel({
               aria-expanded={thinkingOpen}
             >
               <span className="thinkingHeaderLeft">
-                <span className={`thinkingSpinnerWrap${isBusy ? " thinkingSpinnerWrap--active" : ""}`}>
+                <span className={`thinkingSpinnerWrap${isAgentBusy ? " thinkingSpinnerWrap--active" : ""}`}>
                   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
                     <path d="M12 2 C12 7 17 12 22 12 C17 12 12 17 12 22 C12 17 7 12 2 12 C7 12 12 7 12 2 Z" />
                   </svg>
@@ -344,7 +345,7 @@ export function AssistantPanel({
                 <span className="thinkingLabel">
                   {thinkingOpen ? "Hide thinking" : "Show thinking"}
                 </span>
-                {!thinkingOpen && latestActivity && isBusy ? (
+                {!thinkingOpen && latestActivity && isAgentBusy ? (
                   <span className="thinkingCurrentStep">{latestActivity.message}</span>
                 ) : null}
               </span>
@@ -360,7 +361,7 @@ export function AssistantPanel({
                     <span className="thinkingStepText">{event.message}</span>
                   </div>
                 ))}
-                {isBusy ? (
+                {isAgentBusy ? (
                   <div className="thinkingStepLive">
                     <span className="typingDot" />
                     <span className="typingDot" />
@@ -389,13 +390,16 @@ export function AssistantPanel({
         />
         <div className="inputActions">
           <button
-            className={`micBtn${isRecording ? " micBtn--active" : ""}`}
+            className={`micBtn${isRecording ? " micBtn--active" : ""}${isTranscribing ? " micBtn--transcribing" : ""}`}
             type="button"
-            onClick={toggleRecording}
-            title={isRecording ? "Stop recording" : "Speak your request"}
-            aria-label={isRecording ? "Stop recording" : "Start voice input"}
+            onClick={isTranscribing ? undefined : toggleRecording}
+            disabled={isTranscribing}
+            title={isTranscribing ? "Transcribing…" : isRecording ? "Stop recording" : "Speak your request"}
+            aria-label={isTranscribing ? "Transcribing audio" : isRecording ? "Stop recording" : "Start voice input"}
           >
-            {isRecording ? (
+            {isTranscribing ? (
+              <span className="micTranscribeSpinner" aria-hidden="true" />
+            ) : isRecording ? (
               /* Stop square */
               <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true">
                 <rect x="6" y="6" width="12" height="12" rx="2" />
