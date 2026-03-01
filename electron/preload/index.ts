@@ -29,16 +29,18 @@ const api = {
   planAction: (payload: PlanActionInput) => ipcRenderer.invoke("llm:planAction", payload),
   listMcpTools: () => ipcRenderer.invoke("mcp:listTools"),
   callMcpTool: (payload: McpToolCall) => ipcRenderer.invoke("mcp:callTool", payload),
-  pathDbAddBannedActions: (signatures: string[]) =>
-    ipcRenderer.invoke("pathDb:addBannedActions", signatures),
-  pathDbGetBannedActions: () => ipcRenderer.invoke("pathDb:getBannedActions"),
-  pathDbSaveValidPath: (payload: {
-    promptKey: string;
+  isPageRelevantToGoal: (payload: {
+    observation: PageObservation;
     goal: string;
-    actions: import("../../shared/types").BrowserAction[];
-  }) => ipcRenderer.invoke("pathDb:saveValidPath", payload),
-  pathDbFindMatchingPath: (prompt: string) =>
-    ipcRenderer.invoke("pathDb:findMatchingPath", prompt),
+    planSteps?: string[];
+    planStepIndex?: number;
+  }) => ipcRenderer.invoke("llm:isPageRelevantToGoal", payload),
+  isGoalAchieved: (payload: { observation: PageObservation; goal: string }) =>
+    ipcRenderer.invoke("llm:isGoalAchieved", payload),
+  isAtCompletionPoint: (payload: {
+    observation: PageObservation;
+    completionPoint: string;
+  }) => ipcRenderer.invoke("llm:isAtCompletionPoint", payload),
 };
 
 contextBridge.exposeInMainWorld("steadyhands", api);

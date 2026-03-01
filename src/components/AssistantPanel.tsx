@@ -44,8 +44,6 @@ type Props = {
   running: boolean;
   finalAnswer: string;
   confidenceThreshold: number;
-  onThumbsUp?: () => void;
-  showThumbsUp?: boolean;
 };
 
 export function AssistantPanel({
@@ -76,8 +74,6 @@ export function AssistantPanel({
   running,
   finalAnswer,
   confidenceThreshold,
-  onThumbsUp,
-  showThumbsUp,
 }: Props) {
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const chatRef = useRef<HTMLDivElement | null>(null);
@@ -303,20 +299,7 @@ export function AssistantPanel({
 
       {finalAnswer ? (
         <section className="section">
-          <div className="resultHeader">
-            <h2>Result</h2>
-            {showThumbsUp && onThumbsUp ? (
-              <button
-                type="button"
-                className="thumbsUpBtn"
-                onClick={onThumbsUp}
-                title="Save this path as valid"
-                aria-label="Save path"
-              >
-                👍
-              </button>
-            ) : null}
-          </div>
+          <h2>Result</h2>
           <p>{finalAnswer}</p>
         </section>
       ) : null}

@@ -29,6 +29,7 @@ type IntentConfirmation = {
   inferredGoal: string;
   plan: string;
   planSteps?: string[];
+  completion_point?: string;
   searchQuery?: string;
   clarifyingQuestion?: string;
   choices: Array<{ label: string; goal: string }>;
@@ -68,7 +69,7 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [finalAnswer, setFinalAnswer] = useState("");
   const mode: AgentMode = "auto";
-  const [observeTextLimit, setObserveTextLimit] = useState(5000);
+  const [observeTextLimit, setObserveTextLimit] = useState(8000);
   const [enableHighlight, setEnableHighlight] = useState(true);
   const [actionTimeoutMs, setActionTimeoutMs] = useState(7000);
   const [verifyTimeoutMs, setVerifyTimeoutMs] = useState(4000);
@@ -77,7 +78,6 @@ export default function App() {
   const [enableSafetyGuardrails, setEnableSafetyGuardrails] = useState(false);
   const [requireApprovalForRiskyActions, setRequireApprovalForRiskyActions] = useState(false);
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.7);
-  const [canSavePath, setCanSavePath] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [pendingQuestionInput, setPendingQuestionInput] = useState("");
   const [pendingIntentConfirmation, setPendingIntentConfirmation] =
@@ -86,11 +86,6 @@ export default function App() {
   const askUserResolveRef = useRef<((answer: string | null) => void) | null>(null);
   const summaryRequestIdRef = useRef(0);
   const summarizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastRunForThumbsUpRef = useRef<{
-    goal: string;
-    executedActions: BrowserAction[];
-    completed: boolean;
-  } | null>(null);
 
   const pushTimeline = useCallback((kind: AgentTimelineEvent["kind"], message: string) => {
     setTimeline((prev) => [
@@ -336,7 +331,7 @@ export default function App() {
   const startAgentWithResolvedGoal = useCallback(
     async (
       resolvedGoal: string,
-      opts?: { searchQuery?: string; planSteps?: string[] },
+      opts?: { searchQuery?: string; planSteps?: string[]; completion_point?: string },
     ) => {
       if (!browserRef.current || running) return;
       setPendingIntentConfirmation(null);
@@ -344,16 +339,12 @@ export default function App() {
       abortControllerRef.current = new AbortController();
       setRunning(true);
       setFinalAnswer("");
-      setCanSavePath(false);
       summaryRequestIdRef.current += 1;
       try {
-        const [initialObservation, systemContext, presavedPath, initialBannedActions] =
-          await Promise.all([
-            browserRef.current.observe(),
-            window.steadyhands.getSystemContext().catch(() => null),
-            window.steadyhands.pathDbFindMatchingPath(goal),
-            window.steadyhands.pathDbGetBannedActions(),
-          ]);
+        const [initialObservation, systemContext] = await Promise.all([
+          browserRef.current.observe(),
+          window.steadyhands.getSystemContext().catch(() => null),
+        ]);
         const output = await runAgentGraph(
         {
           inferIntent: (rawGoal) =>
@@ -388,7 +379,17 @@ export default function App() {
           act: executeBrowserAction,
           goBack: () => browserRef.current?.goBack(),
           canGoBack: () => browserRef.current?.canGoBack?.() ?? false,
-          onBannedActions: (sigs) => void window.steadyhands.pathDbAddBannedActions(sigs),
+          isPageRelevantToGoal: (obs, g, opts) =>
+            window.steadyhands.isPageRelevantToGoal({
+              observation: obs,
+              goal: g,
+              planSteps: opts?.planSteps,
+              planStepIndex: opts?.planStepIndex,
+            }),
+          isGoalAchieved: (obs, g) =>
+            window.steadyhands.isGoalAchieved({ observation: obs, goal: g }),
+          isAtCompletionPoint: (obs, cp) =>
+            window.steadyhands.isAtCompletionPoint({ observation: obs, completionPoint: cp }),
           maxSteps: 0,
           actionTimeoutMs,
           verifyTimeoutMs,
@@ -402,10 +403,9 @@ export default function App() {
           mode,
           initialObservation,
           resolvedGoal,
+          completion_point: opts?.completion_point,
           searchQuery: opts?.searchQuery,
           planSteps: opts?.planSteps,
-          presavedPath: presavedPath?.actions,
-          initialBannedActions: initialBannedActions?.length ? initialBannedActions : undefined,
           signal: abortControllerRef.current.signal,
           systemContext: systemContext ?? undefined,
         },
@@ -418,12 +418,6 @@ export default function App() {
         setTimeline(output.timeline);
         setSummary(output.finalSummary);
         setFinalAnswer(output.finalAnswer);
-        lastRunForThumbsUpRef.current = {
-          goal,
-          executedActions: output.executedActions ?? [],
-          completed: output.completed,
-        };
-        setCanSavePath((output.executedActions?.length ?? 0) > 0 && output.completed);
       } catch (error) {
         logRenderer("App", "Agent run failed", { error: String(error) });
         pushTimeline("error", error instanceof Error ? error.message : "Unknown error");
@@ -463,6 +457,7 @@ export default function App() {
         inferredGoal: string;
         plan: string;
         planSteps?: string[];
+        completion_point?: string;
         searchQuery?: string;
         clarifyingQuestion?: string;
         choices: Array<{ label: string; goal: string }>;
@@ -480,6 +475,7 @@ export default function App() {
         inferredGoal: result.inferredGoal,
         plan: result.plan,
         planSteps: result.planSteps,
+        completion_point: result.completion_point,
         searchQuery: result.searchQuery,
         clarifyingQuestion: result.clarifyingQuestion,
         choices: result.choices ?? [],
@@ -504,6 +500,7 @@ export default function App() {
     void startAgentWithResolvedGoal(resolved, {
       searchQuery: pendingIntentConfirmation.searchQuery,
       planSteps: pendingIntentConfirmation.planSteps,
+      completion_point: pendingIntentConfirmation.completion_point,
     });
   }, [pendingIntentConfirmation, buildResolvedGoal, pushChat, startAgentWithResolvedGoal]);
 
@@ -528,6 +525,7 @@ export default function App() {
       void startAgentWithResolvedGoal(resolved, {
         searchQuery: pendingIntentConfirmation.searchQuery,
         planSteps: pendingIntentConfirmation.planSteps,
+        completion_point: pendingIntentConfirmation.completion_point,
       });
     },
     [pendingIntentConfirmation, buildResolvedGoal, pushChat, startAgentWithResolvedGoal],
@@ -562,6 +560,7 @@ export default function App() {
         inferredGoal: result.inferredGoal,
         plan: result.plan,
         planSteps: result.planSteps,
+        completion_point: result.completion_point,
         searchQuery: result.searchQuery,
         clarifyingQuestion: result.clarifyingQuestion,
         choices: result.choices ?? [],
@@ -574,22 +573,6 @@ export default function App() {
       setIntentInferring(false);
     }
   }, [pendingIntentConfirmation, pendingQuestionInput, pushChat]);
-
-  const onThumbsUp = useCallback(async () => {
-    const last = lastRunForThumbsUpRef.current;
-    if (!last || last.executedActions.length === 0) return;
-    try {
-      await window.steadyhands.pathDbSaveValidPath({
-        promptKey: last.goal.slice(0, 200),
-        goal: last.goal,
-        actions: last.executedActions,
-      });
-      pushChat("system", "Path saved. Future runs with similar goals will use this path.");
-    } catch (error) {
-      logRenderer("App", "pathDbSaveValidPath failed", { error: String(error) });
-      pushChat("system", `Failed to save path: ${error instanceof Error ? error.message : "Unknown error"}`);
-    }
-  }, [pushChat]);
 
   const onUrlChanged = (nextUrl: string) => {
     logRenderer("App", "onUrlChanged", { nextUrl });
@@ -666,8 +649,6 @@ export default function App() {
           running={running}
           finalAnswer={finalAnswer}
           confidenceThreshold={confidenceThreshold}
-          showThumbsUp={!running && !!finalAnswer && canSavePath}
-          onThumbsUp={onThumbsUp}
         />
         <BrowserPane
           ref={browserRef}

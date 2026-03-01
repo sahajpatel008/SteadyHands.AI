@@ -160,37 +160,6 @@ body {
   border-top: 1px solid #dce5e3;
 }
 
-.resultHeader {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-
-.resultHeader h2 {
-  margin: 0;
-}
-
-.thumbsUpBtn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  padding: 0;
-  border: 2px solid var(--accent);
-  border-radius: 10px;
-  background: var(--chip-ready);
-  font-size: 1.4rem;
-  cursor: pointer;
-  transition: transform 0.15s, background 0.15s;
-}
-
-.thumbsUpBtn:hover {
-  background: #b8e8d9;
-  transform: scale(1.05);
-}
-
 .label {
   display: block;
   margin-bottom: 8px;

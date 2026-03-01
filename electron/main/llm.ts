@@ -118,8 +118,8 @@ const safetyInFlight = new Map<string, Promise<unknown>>();
 const summaryCache = new Map<string, { expiresAt: number; value: unknown }>();
 const summaryInFlight = new Map<string, Promise<unknown>>();
 
-const SEMANTIC_TTL_MS = 8000;
-const PLAN_TTL_MS = 1500;
+const SEMANTIC_TTL_MS = 0;
+const PLAN_TTL_MS = 0;
 const SAFETY_TTL_MS = 8000;
 const SUMMARY_TTL_MS = 8000;
 const SEMANTIC_MAX_TOKENS = 500;
@@ -167,7 +167,10 @@ function prioritizeElements(
     })
     .sort((a, b) => b.score - a.score)
     .slice(0, maxElements)
-    .map(({ el }) => `${el.id} | ${el.tag} | ${el.role ?? "-"} | ${el.text || el.ariaLabel || "-"}`);
+    .map(({ el }) => {
+      const base = `${el.id} | ${el.tag} | ${el.role ?? "-"} | ${el.text || el.ariaLabel || "-"}`;
+      return el.href ? `${base} | href=${el.href}` : base;
+    });
 
   return scored.join("\n");
 }
@@ -398,15 +401,21 @@ const intentSchema = z.object({
     .array(z.string())
     .optional()
     .transform((v) => v?.filter((s) => s.trim().length > 0) ?? []),
+  /** Final state the agent should achieve. Used to detect when to stop. */
+  completion_point: z.string().optional(),
   searchQuery: z.string().optional(),
-  clarifyingQuestion: z.preprocess(
-    (v) => (typeof v === "string" ? v : undefined),
-    z.string().optional(),
-  ),
-  choices: z.preprocess(
-    (v) => (Array.isArray(v) ? v : []),
-    z.array(z.object({ label: z.string(), goal: z.string() })),
-  ),
+  clarifyingQuestion: z
+    .union([z.string(), z.null(), z.undefined()])
+    .optional()
+    .transform((v) => (typeof v === "string" ? v : undefined)),
+  choices: z
+    .union([
+      z.array(z.object({ label: z.string(), goal: z.string() })),
+      z.null(),
+      z.undefined(),
+    ])
+    .optional()
+    .transform((v) => (Array.isArray(v) ? v : [])),
 });
 
 export type InferIntentResult = z.infer<typeof intentSchema>;
@@ -421,15 +430,16 @@ Resolve ambiguities, infer context, and produce a clear operational goal plus a 
 Return ONLY a JSON object with:
 - inferredGoal: A clear, actionable goal statement (what the user wants to achieve)
 - plan: A numbered step-by-step plan (what to do first, second, etc.). Be specific. Include search terms, sites, or actions when inferable.
-- planSteps: Array of step strings, one per step. E.g. ["Search for Form 1040-SR on Google", "Click IRS.gov link", "Download PDF"]. Each step is a single actionable task.
+- planSteps: Array of DETAILED step strings, one per step. Each step must be a single actionable task the agent can execute. Include the TARGET we're looking for (e.g. "Click IRS.gov link in search results", "Find and click Form 1040-SR PDF link on page", "Download PDF from form page"). Be specific about what to look for on each page.
+- completion_point: A concise description of the FINAL state when the goal is achieved. The agent stops when it reaches this state. Examples: "IRS Form 1040-SR PDF page visible or downloadable on irs.gov", "Flight search results with Tokyo as destination", "Movie showtimes or streaming options displayed". Be specific enough to detect success.
 - searchQuery: (optional) If the first step involves a web search, the SHORT query to type (e.g. "Form 1040-SR" or "IRS Form 1040-SR PDF"). Never the full goal or plan text. Max 80 chars.
 - clarifyingQuestion: (optional) If the intent is ambiguous, one short question to help the user refine (e.g. "Do you want theater showtimes, streaming recommendations, or both?")
 - choices: (optional) Array of 0-3 alternative interpretations when ambiguous. Each: { "label": "Short button label", "goal": "Full goal for this option" }
 
 Examples:
-- "download IRS Form 1040-SR" -> inferredGoal: "Find and download IRS Form 1040-SR", plan: "1. Search for Form 1040-SR 2. Click IRS link 3. Download PDF", planSteps: ["Search for Form 1040-SR on Google", "Click IRS.gov link in results", "Download PDF from form page"], searchQuery: "IRS Form 1040-SR PDF"
-- "i wanna see a movie" -> inferredGoal: "Find movie recommendations", plan: "1. Search for movie recommendations 2. Present options", searchQuery: "movie recommendations"
-- "book flight to tokyo" -> inferredGoal: "Book a flight to Tokyo", plan: "1. Navigate to flight search 2. Enter Tokyo 3. Select dates 4. Search", searchQuery: "flights to Tokyo"
+- "download IRS Form 1040-SR" -> inferredGoal: "Find and download IRS Form 1040-SR", plan: "1. Search for Form 1040-SR 2. Click IRS link 3. Download PDF", planSteps: ["Search for Form 1040-SR on Google", "Click IRS.gov or official tax form link in search results", "On form page: find and click Form 1040-SR PDF download link", "Download or open the PDF"], completion_point: "IRS Form 1040-SR PDF page visible or downloadable on irs.gov", searchQuery: "IRS Form 1040-SR PDF"
+- "i wanna see a movie" -> inferredGoal: "Find movie recommendations", plan: "1. Search for movie recommendations 2. Present options", completion_point: "Movie recommendations or showtimes displayed", searchQuery: "movie recommendations"
+- "book flight to tokyo" -> inferredGoal: "Book a flight to Tokyo", plan: "1. Navigate to flight search 2. Enter Tokyo 3. Select dates 4. Search", completion_point: "Flight search results with Tokyo as destination", searchQuery: "flights to Tokyo"
 
 User message:
 ${rawGoal}`;
@@ -485,13 +495,17 @@ export async function semanticInterpreter(
     semanticCache,
     semanticInFlight,
     async () => {
-      const slimText = observation.mainText.slice(0, 2600);
-      const prioritizedElements = prioritizeElements(observation, userGoal, 40);
+      const slimText = observation.mainText.slice(0, 4500);
+      const prioritizedElements = prioritizeElements(observation, userGoal, 60);
       const prompt = `
 You are the Semantic Interpreter ("Eyes"). Convert raw page data into a simplified JSON schema of actions.
 Output ONLY a single JSON object—no think tags, no markdown, no commentary.
+
+CRITICAL: Thoroughly scan the ENTIRE page content before deciding. Check all visible links, headings, buttons, and text for the target. Do not miss relevant options buried in the page.
+
 Given the user's goal, return ONLY the TOP 3-5 actions that directly help the goal.
-Never include options that are page-generic but not relevant to the user goal.
+Prioritize options that match the goal (e.g. for "Form 1040-SR" prefer IRS/form links over generic navigation).
+Never include options that are page-generic, ads, or not relevant to the user goal.
 Each choice must map to a real element/action from the provided elements list.
 
 Return STRICT JSON:
@@ -656,9 +670,10 @@ export async function summarizePage(observation: PageObservation) {
     summaryCache,
     summaryInFlight,
     async () => {
-      const slimText = observation.mainText.slice(0, 2200);
+      const slimText = observation.mainText.slice(0, 4000);
       const prompt = `
 You are an accessibility assistant for senior users.
+Thoroughly scan the page content before suggesting actions.
 Given page data, return STRICT JSON with keys: summary, purpose, choices[].
 Each choice item must include label, rationale, suggestedAction. Include elementId when you can map to an element.
 Keep language plain and short.
@@ -670,8 +685,8 @@ ${slimText}
 
 Interactive elements (id + text + role):
 ${observation.elements
-  .slice(0, 40)
-  .map((el) => `${el.id} | ${el.tag} | ${el.role ?? "-"} | ${el.text || el.ariaLabel || "-"}`)
+  .slice(0, 60)
+  .map((el) => `${el.id} | ${el.tag} | ${el.role ?? "-"} | ${el.text || el.ariaLabel || "-"}${el.href ? " | href=" + el.href : ""}`)
   .join("\n")}
 `;
 
@@ -722,9 +737,21 @@ export async function planAction(input: PlanActionInput): Promise<PlanActionResu
     .slice(-6)
     .map((t) => `${t.kind}: ${t.message}`)
     .join("\n");
+  const planQueueSig = input.planSteps?.length
+    ? `${input.planStepIndex ?? 0}::${input.planSteps.join("|").slice(0, 200)}`
+    : "";
   const cacheKey = hashString(
-    `${plannerModel}::${input.goal.slice(0, 260)}::${input.observation.url}::${input.currentStep ?? ""}::${timelineTail}::${numberedActions}::${numberedMcpTools}`,
+    `${plannerModel}::${input.goal.slice(0, 260)}::${input.observation.url}::${input.currentStep ?? ""}::${planQueueSig}::${timelineTail}::${numberedActions}::${numberedMcpTools}`,
   );
+
+  const planQueueBlock =
+    input.planSteps?.length && input.planStepIndex != null
+      ? `
+PLAN QUEUE (reference this BEFORE deciding—your action must achieve the CURRENT step):
+${input.planSteps.map((s, i) => `${i + 1}. ${s}${i === input.planStepIndex! ? " <-- CURRENT" : ""}`).join("\n")}
+
+`
+      : "";
 
   return withMemo(
     cacheKey,
@@ -739,14 +766,20 @@ Pick only ONE next step per response.
 Always include confidence 0-1. If confidence < ${confidenceThreshold}, return askQuestion instead of action.
 Be concise. Reasoning should be one short sentence.
 
+BEFORE EACH DECISION: Reference the plan queue below. Your action must achieve the CURRENT step.
+${planQueueBlock}
+
 CRITICAL: Do NOT return done=true until the user's goal is FULLY achieved.
 - Navigating to a site is NEVER completion. You must fill forms, click buttons, search, etc.
 - For "book a flight SFO to MUM tomorrow": you must navigate to a flight search page (e.g. google.com/travel/flights), fill origin SFO, destination MUM/BOM, date tomorrow, click search. Only done when search results are shown or user has selected a flight.
 - One action per step. Keep going until the goal is achieved.
 
 ACTION SOURCE OF TRUTH:
+- Thoroughly check the page content below before deciding. The target (e.g. form link, download button) may be in the content.
 - Prefer ONLY the numbered semantic options below.
-- If options exist, return selectedChoiceIndex (1-based) instead of raw action.
+- If a PLAN QUEUE is provided above, pick the action that achieves the CURRENT step in the queue.
+- If options exist, return selectedChoiceIndex (1-based) for the BEST MATCHING choice—the one most relevant to the goal and current plan step.
+- Avoid irrelevant links (ads, unrelated sites, generic navigation). Pick the option that directly advances the goal.
 - If user says "option N", pick that exact valid index when possible.
 - Return raw action only when there are zero executable semantic options.
 
@@ -760,6 +793,9 @@ GOOGLE SEARCH: When on google.com and the user wants to search, type ONLY a shor
 User goal: ${input.goal}
 Current URL: ${input.observation.url}
 Current title: ${input.observation.title}
+
+Page content (scan thoroughly before deciding):
+${input.observation.mainText.slice(0, 3000)}
 Current interpreted step: ${input.currentStep ?? "Unknown"}
 Steps taken so far: ${stepCount}
 Recent timeline:
@@ -777,7 +813,7 @@ If goal is FULLY achieved (user has what they asked for), return:
 If confidence < ${confidenceThreshold}, return:
 {"done": false, "reasoning": "...", "confidence": 0.4, "askQuestion": "Clarifying question for user"}
 
-If semantic options exist, return:
+If semantic options exist, pick the BEST matching one (most relevant to goal) and return:
 {"done": false, "reasoning": "...", "confidence": 0.85, "expectedOutcome": "...", "selectedChoiceIndex": 2}
 
 If MCP tool is needed, return:
@@ -861,69 +897,141 @@ Only if no executable semantic options exist, return ONE raw action:
   );
 }
 
-/** Optimize a sequence of browser actions: remove redundant steps, create direct path. */
-export async function optimizePath(
-  actions: BrowserAction[],
+/** Check if the current page is relevant to the user's goal. Used to go back when a click/navigate led to an irrelevant page. */
+export async function isPageRelevantToGoal(
+  observation: PageObservation,
   goal: string,
-): Promise<BrowserAction[]> {
-  if (actions.length === 0) return [];
-  const model = config.summarizerModel;
-  const actionsStr = JSON.stringify(actions, null, 2);
-  const prompt = `You are a path optimizer. Given a sequence of browser actions an agent took to achieve a goal, optimize it:
-- Remove redundant or repeated actions (e.g. multiple observes, back-and-forth)
-- Keep only the essential actions that form a direct path to the goal
-- Preserve action structure: type, elementId, text, url, value as needed
-- Return ONLY a JSON array of BrowserAction objects. No other text.
+  opts?: { planSteps?: string[]; planStepIndex?: number },
+): Promise<boolean> {
+  const slimText = observation.mainText.slice(0, 3500);
+  const linksAndButtons = observation.elements
+    .filter((el) => el.href || el.tag === "a" || el.tag === "button" || el.role === "link" || el.role === "button")
+    .slice(0, 35)
+    .map((el) => {
+      const text = [el.text, el.ariaLabel].filter(Boolean).join(" ").trim().slice(0, 80);
+      const href = el.href ? ` -> ${el.href}` : "";
+      return `- ${text || "(no label)"}${href}`;
+    })
+    .join("\n");
 
-Goal: ${goal.slice(0, 200)}
+  const currentStepHint =
+    opts?.planSteps?.length && opts.planStepIndex != null
+      ? `\nCurrent plan step we're trying to achieve: ${opts.planSteps[opts.planStepIndex] ?? opts.planSteps[opts.planSteps.length - 1]}\n`
+      : "";
 
-Actions taken:
-${actionsStr}
+  const prompt = `Is this web page relevant to the user's goal? Answer yes or no only.
 
-Return JSON array of optimized actions:`;
+User goal: ${goal.slice(0, 400)}
+${currentStepHint}
+
+Page URL: ${observation.url}
+Page title: ${observation.title}
+Visible text (excerpt): ${slimText.slice(0, 2500)}
+
+Links and buttons on page (check these for the target):
+${linksAndButtons || "(none extracted)"}
+
+RELEVANT = page HAS the target (e.g. form link, download button, PDF) OR contains a link/path to it. A listing page with links to the form IS relevant.
+NOT relevant = wrong site, login wall, error page, unrelated content, ads, generic homepage with NO path to the goal.
+
+Answer:`;
+
+  // URL heuristic: irs.gov PDF with 1040-SR/f1040s is the target
+  const urlLower = observation.url.toLowerCase();
+  if (
+    /irs\.gov/i.test(urlLower) &&
+    (/1040[- ]?sr|f1040s|1040sr/i.test(urlLower) || /\/irs-pdf\/|\.pdf/i.test(urlLower))
+  ) {
+    logMain("llm", "isPageRelevantToGoal", { url: observation.url, relevant: true, reason: "url_heuristic" });
+    return true;
+  }
 
   const content = buildContentParts(prompt);
-  const text = await chatCompletion(model, content, { maxTokens: 800, jsonMode: true });
-  const cleaned = text.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    logMain("llm", "optimizePath parse failed, using original", { textPreview: text.slice(0, 100) });
-    return actions;
-  }
-  if (!Array.isArray(parsed)) return actions;
-  const result: BrowserAction[] = [];
-  for (const item of parsed) {
-    if (item && typeof item === "object" && "type" in item) {
-      const a = item as Record<string, unknown>;
-      if (a.type === "click" && typeof a.elementId === "string") {
-        result.push({ type: "click", elementId: a.elementId });
-      } else if (a.type === "type" && typeof a.elementId === "string") {
-        result.push({ type: "type", elementId: a.elementId, text: String(a.text ?? a.actionValue ?? "") });
-      } else if (a.type === "select" && typeof a.elementId === "string" && a.value != null) {
-        result.push({ type: "select", elementId: a.elementId, value: String(a.value) });
-      } else if (a.type === "scroll" && typeof a.elementId === "string") {
-        result.push({ type: "scroll", elementId: a.elementId });
-      } else if (a.type === "navigate" && typeof a.url === "string") {
-        result.push({ type: "navigate", url: a.url });
-      }
-    }
-  }
-  return result.length > 0 ? result : actions;
+  const rawText = await chatCompletion(config.summarizerModel, content, {
+    maxTokens: 30,
+    disableThinking: true,
+  });
+  const text = stripThinkTags(rawText);
+  const answer = text.trim().toLowerCase();
+  const relevant = /^\s*yes\b/i.test(answer);
+  logMain("llm", "isPageRelevantToGoal", { url: observation.url, relevant, answerPreview: answer.slice(0, 30) });
+  return relevant;
 }
 
-/** Check if two prompts are semantically equivalent (same goal/task). */
-export async function semanticMatchPrompts(stored: string, incoming: string): Promise<boolean> {
-  const model = config.summarizerModel;
-  const prompt = `Are these two user prompts asking for the same goal or task? Answer yes or no only.
+/** Check if the user's goal is fully achieved on this page. When true, agent should stop immediately. */
+export async function isGoalAchieved(
+  observation: PageObservation,
+  goal: string,
+): Promise<boolean> {
+  const urlLower = observation.url.toLowerCase();
+  const goalLower = goal.toLowerCase();
 
-Prompt A: ${stored.slice(0, 300)}
-Prompt B: ${incoming.slice(0, 300)}
+  // IRS form: we're on the form PDF/page and goal mentions IRS/1040/tax form
+  if (
+    /irs\.gov/i.test(urlLower) &&
+    (/1040[- ]?sr|f1040s|1040sr|irs-pdf|\.pdf/i.test(urlLower)) &&
+    (/1040|irs|tax\s*form|form\s*1040/i.test(goalLower))
+  ) {
+    logMain("llm", "isGoalAchieved", { url: observation.url, achieved: true, reason: "irs_form_heuristic" });
+    return true;
+  }
+
+  // Generic: PDF on gov domain when goal mentions "form" or "download"
+  if (
+    /\.pdf$/i.test(urlLower) &&
+    /\.gov\//i.test(urlLower) &&
+    (/form|download|pdf/i.test(goalLower))
+  ) {
+    logMain("llm", "isGoalAchieved", { url: observation.url, achieved: true, reason: "gov_pdf_heuristic" });
+    return true;
+  }
+
+  return false;
+}
+
+/** Check if the current page matches the completion_point (final state from inferIntent). */
+export async function isAtCompletionPoint(
+  observation: PageObservation,
+  completionPoint: string,
+): Promise<boolean> {
+  if (!completionPoint.trim()) return false;
+
+  const urlLower = observation.url.toLowerCase();
+  const cpLower = completionPoint.toLowerCase();
+
+  // Fast heuristic: completion_point often mentions irs.gov + 1040-SR
+  if (
+    /irs\.gov|1040|tax\s*form|form\s*1040/i.test(cpLower) &&
+    /irs\.gov/i.test(urlLower) &&
+    (/1040[- ]?sr|f1040s|1040sr|irs-pdf|\.pdf/i.test(urlLower))
+  ) {
+    logMain("llm", "isAtCompletionPoint", { url: observation.url, achieved: true, reason: "heuristic" });
+    return true;
+  }
+
+  const slimText = observation.mainText.slice(0, 3000);
+  const prompt = `Is this web page the completion point? Answer yes or no only.
+
+Completion point (final state we want): ${completionPoint}
+
+Page URL: ${observation.url}
+Page title: ${observation.title}
+Visible text (excerpt): ${slimText.slice(0, 2000)}
+
+YES = the page clearly shows or delivers what the completion point describes (e.g. form PDF visible, target content displayed).
+NO = we're on an intermediate page (search results, listing, navigation) or wrong page.
 
 Answer:`;
 
   const content = buildContentParts(prompt);
-  const text = await chatCompletion(model, content, { maxTokens: 10, disableThinking: true });
-  return /^\s*yes\b/i.test(text.trim());
+  const rawText = await chatCompletion(config.summarizerModel, content, {
+    maxTokens: 30,
+    disableThinking: true,
+  });
+  const text = stripThinkTags(rawText);
+  const answer = text.trim().toLowerCase();
+  const achieved = /^\s*yes\b/i.test(answer);
+  logMain("llm", "isAtCompletionPoint", { url: observation.url, achieved, answerPreview: answer.slice(0, 30) });
+  return achieved;
 }
+

@@ -5,19 +5,14 @@ import { fileURLToPath } from "node:url";
 import { getConfig, getPublicConfig } from "./config";
 import {
   inferIntent,
+  isAtCompletionPoint,
+  isGoalAchieved,
+  isPageRelevantToGoal,
   planAction,
   summarizePage,
   safetySupervisor,
   semanticInterpreter,
-  optimizePath,
-  semanticMatchPrompts,
 } from "./llm";
-import {
-  addBannedActions as pathDbAddBanned,
-  getBannedActions as pathDbGetBanned,
-  addValidPath as pathDbAddValid,
-  findMatchingPath as pathDbFindMatching,
-} from "./pathDb";
 import { logMain } from "../../shared/logger";
 import { McpClientManager } from "./mcp";
 import type { McpToolCall, PageObservation, PlanActionInput } from "../../shared/types";
@@ -177,33 +172,34 @@ function setupIpcHandlers() {
     return result;
   });
 
-  ipcMain.handle("pathDb:addBannedActions", async (_, signatures: string[]) => {
-    pathDbAddBanned(signatures);
-    return undefined;
-  });
-
-  ipcMain.handle("pathDb:getBannedActions", () => pathDbGetBanned());
-
   ipcMain.handle(
-    "pathDb:saveValidPath",
+    "llm:isPageRelevantToGoal",
     async (
       _,
-      payload: { promptKey: string; goal: string; actions: import("../../shared/types").BrowserAction[] },
+      payload: {
+        observation: PageObservation;
+        goal: string;
+        planSteps?: string[];
+        planStepIndex?: number;
+      },
     ) => {
-      const optimized = await optimizePath(payload.actions, payload.goal);
-      pathDbAddValid({
-        promptKey: payload.promptKey,
-        promptNormalized: payload.goal.slice(0, 500),
-        actions: optimized,
-        createdAt: new Date().toISOString(),
+      return isPageRelevantToGoal(payload.observation, payload.goal, {
+        planSteps: payload.planSteps,
+        planStepIndex: payload.planStepIndex,
       });
-      return { optimizedCount: optimized.length };
     },
   );
 
-  ipcMain.handle("pathDb:findMatchingPath", async (_, prompt: string) => {
-    return pathDbFindMatching(prompt, semanticMatchPrompts);
+  ipcMain.handle("llm:isGoalAchieved", async (_, payload: { observation: PageObservation; goal: string }) => {
+    return isGoalAchieved(payload.observation, payload.goal);
   });
+
+  ipcMain.handle(
+    "llm:isAtCompletionPoint",
+    async (_, payload: { observation: PageObservation; completionPoint: string }) => {
+      return isAtCompletionPoint(payload.observation, payload.completionPoint);
+    },
+  );
 }
 
 app.whenReady().then(() => {

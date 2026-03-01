@@ -29,11 +29,27 @@ export function getExtractionScript(textLimit: number): string {
   const elements = [];
   let index = 0;
 
+  const url = (typeof window !== "undefined" && window.location?.href) || "";
+  const isGoogleHome =
+    /^https?:\\/\\/(www\\.)?google\\.com\\/?([#?]|$)/i.test(url) &&
+    !url.includes("/search");
+
   for (const node of candidates) {
     if (!(node instanceof HTMLElement)) continue;
     if (!isVisible(node)) continue;
     const rect = node.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) continue;
+
+    if (isGoogleHome) {
+      const tag = node.tagName.toLowerCase();
+      const name = node.getAttribute("name");
+      const type = node instanceof HTMLInputElement ? node.type : null;
+      const isSearchInput =
+        (tag === "textarea" || tag === "input") && name === "q";
+      const isGoogleSearchBtn =
+        tag === "input" && type === "submit" && name === "btnK";
+      if (!isSearchInput && !isGoogleSearchBtn) continue;
+    }
 
     const id = "sh-" + index++;
     node.setAttribute("data-sh-id", id);
@@ -55,11 +71,19 @@ export function getExtractionScript(textLimit: number): string {
     elements.push(item);
   }
 
+  const headingEls = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6")).filter((el) => isVisible(el)).slice(0, 20);
+  const headings = headingEls.map((el) => {
+    const level = parseInt(el.tagName.charAt(1), 10);
+    const t = cleanText(el.innerText || el.textContent || "");
+    return (level === 1 ? "H1: " : "H" + level + ": ") + t.slice(0, 120);
+  }).join("\\n");
+
   const bodyText = cleanText(document.body?.innerText || "").slice(0, ${textLimit});
+  const pageStructure = headings ? "[Page structure]\\n" + headings + "\\n\\n[Content]\\n" : "";
   return {
     title: document.title || "Untitled",
     url: window.location.href,
-    mainText: bodyText,
+    mainText: pageStructure + bodyText,
     elements
   };
 })();

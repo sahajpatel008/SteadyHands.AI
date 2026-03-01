@@ -18,7 +18,13 @@ import {
 import { choiceToAction } from "./choiceAction";
 
 type GraphDeps = {
-  inferIntent: (rawGoal: string) => Promise<{ inferredGoal: string; plan: string }>;
+  inferIntent: (rawGoal: string) => Promise<{
+    inferredGoal: string;
+    plan: string;
+    planSteps?: string[];
+    completion_point?: string;
+    searchQuery?: string;
+  }>;
   observe: () => Promise<PageObservation>;
   semanticInterpreter: (
     observation: PageObservation,
@@ -34,7 +40,19 @@ type GraphDeps = {
   act: (action: BrowserAction) => Promise<ActionExecutionResult>;
   goBack?: () => void;
   canGoBack?: () => boolean;
-  onBannedActions?: (signatures: string[]) => void;
+  /** Check if current page is relevant to goal; if false after navigate/click, agent will go back. */
+  isPageRelevantToGoal?: (
+    observation: PageObservation,
+    goal: string,
+    opts?: { planSteps?: string[]; planStepIndex?: number },
+  ) => Promise<boolean>;
+  /** Check if goal is fully achieved on this page; if true, agent stops immediately. */
+  isGoalAchieved?: (observation: PageObservation, goal: string) => Promise<boolean>;
+  /** Check if current page matches completion_point from inferIntent; if true, agent stops. */
+  isAtCompletionPoint?: (
+    observation: PageObservation,
+    completionPoint: string,
+  ) => Promise<boolean>;
   listMcpTools: () => Promise<McpToolDescriptor[]>;
   callMcpTool: (call: McpToolCall) => Promise<McpToolCallResult>;
   askUser: (question: string) => Promise<string | null>;
@@ -70,6 +88,8 @@ type LoopToolCall =
 type LoopState = {
   goal: string;
   searchQuery?: string;
+  /** Final state from inferIntent; when reached, agent stops. */
+  completion_point?: string;
   /** Queued plan steps. Planner focuses on planStepIndex. */
   planSteps: string[];
   planStepIndex: number;
@@ -87,7 +107,6 @@ type LoopState = {
   finalAnswer: string;
   compactedContext: string;
   contextLedger: string[];
-  bannedActions: Set<string>;
   actionFailureStreak: Record<string, number>;
   noProgressCycles: number;
   noProgressFallbacks: number;
@@ -96,18 +115,16 @@ type LoopState = {
   prefetchedSemanticPromise: Promise<(PageSummary & { current_step?: string })> | null;
   prefetchedSemanticFingerprint: string | null;
   decisionCache: Map<string, LoopToolCall>;
-  /** Choice indices to skip when planner keeps picking non-executable options. */
-  bannedChoiceIndices: Set<number>;
   /** Timer-based loop detection: fingerprint we've been stuck on. */
   pageStuckFingerprint: string | null;
   /** When we first saw this fingerprint (ms). */
   pageStuckSince: number | null;
   /** Step count when we first got stuck on this page. */
   stepsWhenPageStuck: number;
-  /** Action signatures executed on current page; banned when we go back from a stuck loop. */
-  actionsOnCurrentPage: string[];
   /** Full sequence of browser actions executed this run (for path storage). */
   executedActions: BrowserAction[];
+  /** URLs we navigated to that were irrelevant; skip when picking next search result. */
+  triedDestinationUrls: Set<string>;
   metrics: {
     semanticCalls: number;
     planCalls: number;
@@ -119,7 +136,7 @@ type LoopState = {
   };
 };
 
-const LOOP_STUCK_MS = 15000;
+const LOOP_STUCK_MS = 5000;
 const LOOP_GOBACK_WAIT_MS = 2000;
 
 type ActionRunResult = {
@@ -300,7 +317,6 @@ function pickDeterministicAction(
       action: choiceToAction(choice),
     }))
     .filter((entry): entry is { choice: SidebarChoice; index: number; action: BrowserAction } => !!entry.action)
-    .filter((entry) => !state.bannedActions.has(getActionSignature(entry.action)))
     .filter((entry) => !excludeChoiceIndices?.has(entry.index));
 
   if (executable.length === 0) return null;
@@ -356,15 +372,47 @@ function pickDeterministicAction(
     }
   }
 
+  // When on search results page: pick first organic result (external link), skip already-tried URLs
+  if (/\/search/i.test(url) && executable.length >= 1) {
+    const linkEntries = executable
+      .filter((e) => {
+        if (e.action.type !== "click") return false;
+        const href = getChoiceDestinationUrl(e.choice, state.observation.elements);
+        if (!href) return false;
+        if (!isOrganicLink(href)) return false;
+        const normalized = normalizeUrlForTried(href);
+        if (state.triedDestinationUrls.has(normalized)) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const idxA = state.observation.elements.findIndex((el) => el.id === a.choice.elementId);
+        const idxB = state.observation.elements.findIndex((el) => el.id === b.choice.elementId);
+        return idxA - idxB;
+      });
+    if (linkEntries.length > 0) {
+      return {
+        action: linkEntries[0].action,
+        label: linkEntries[0].choice.label,
+        choiceIndex: linkEntries[0].index,
+        source: "deterministic first search result",
+      };
+    }
+    // Exhausted organic results - return null so caller can go back
+  }
+
   const tokens = tokenize(state.goal);
   const scored = executable
     .map((entry) => {
       const haystack = `${entry.choice.label} ${entry.choice.rationale} ${entry.choice.suggestedAction} ${entry.choice.actionValue ?? ""}`.toLowerCase();
       let score = 0;
       for (const token of tokens) {
-        if (haystack.includes(token)) score += 2;
+        if (haystack.includes(token)) score += 3;
       }
-      if (entry.action.type === "navigate") score += 1;
+      if (entry.action.type === "navigate") {
+        const url = (entry.choice.actionValue ?? "").toLowerCase();
+        const urlRelevant = tokens.some((t) => url.includes(t));
+        score += urlRelevant ? 4 : 0;
+      }
       const failurePenalty = state.actionFailureStreak[getActionSignature(entry.action)] ?? 0;
       return { ...entry, score: score - failurePenalty * 4 };
     })
@@ -397,8 +445,12 @@ function buildPromptGoal(state: LoopState, _input: AgentRunInput): string {
   if (state.planSteps.length > 0) {
     const idx = Math.min(state.planStepIndex, state.planSteps.length - 1);
     const currentPlanStep = state.planSteps[idx];
-    const queueInfo = `Queued plan step ${idx + 1}/${state.planSteps.length}: ${currentPlanStep}`;
-    parts.push(`\n${queueInfo}\nSelect the action that achieves THIS step.`);
+    const fullQueue = state.planSteps
+      .map((s, i) => `${i + 1}. ${s}${i === idx ? " <-- CURRENT" : ""}`)
+      .join("\n");
+    parts.push(
+      `\nPlan queue (reference before each decision):\n${fullQueue}\n\nSelect the action that achieves the CURRENT step.`,
+    );
   }
   if (recentUserNotes) parts.push(`Recent notes:\n${recentUserNotes}`);
   if (compactContext) parts.push(`Compact context:\n${compactContext}`);
@@ -531,6 +583,8 @@ function maybeCompactContext(state: LoopState): LoopState {
 function getNavigateFallbackAction(state: LoopState): BrowserAction | null {
   const goal = state.goal.toLowerCase();
   const url = state.observation.url.toLowerCase();
+  const query = state.searchQuery ?? deriveGoalQuery(state.goal);
+  const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query.slice(0, 120))}`;
 
   if (/flight|ticket|airline|travel/.test(goal)) {
     if (!url.includes("google.com/travel/flights")) {
@@ -539,25 +593,54 @@ function getNavigateFallbackAction(state: LoopState): BrowserAction | null {
     return { type: "navigate", url: "https://www.skyscanner.com" };
   }
 
+  // On Google with no progress: try direct search URL
   if (url.includes("google.com") && state.noProgressCycles >= 2) {
-    return {
-      type: "navigate",
-      url: `https://www.google.com/search?q=${encodeURIComponent(state.goal.slice(0, 120))}`,
-    };
+    return { type: "navigate", url: searchUrl };
+  }
+
+  // On a completely different site with no progress: first we tried the page's search/links;
+  // can't go anywhere, so go to Google and start there.
+  if (!url.includes("google.com") && state.noProgressCycles >= 2) {
+    return { type: "navigate", url: searchUrl };
   }
 
   return null;
 }
 
-function pickAlternativeAction(
-  choices: SidebarChoice[],
-  bannedSignatures: Set<string>,
-): { action: BrowserAction; index: number; label: string } | null {
-  for (let i = 0; i < choices.length; i += 1) {
-    const action = choiceToAction(choices[i]);
-    if (!action) continue;
-    if (bannedSignatures.has(getActionSignature(action))) continue;
-    return { action, index: i + 1, label: choices[i].label };
+function normalizeUrlForTried(url: string): string {
+  return url.replace(/\/$/, "").toLowerCase().trim();
+}
+
+function getChoiceDestinationUrl(choice: SidebarChoice, elements: { id: string; href: string | null }[]): string | null {
+  if (!choice.elementId) return null;
+  const el = elements.find((e) => e.id === choice.elementId);
+  return el?.href ?? null;
+}
+
+/** True if href points to external site (not Google-owned). */
+function isOrganicLink(href: string): boolean {
+  const lower = href.toLowerCase();
+  return !/google\.com|\.google\.|ai\.google|youtube\.|gstatic\.|gmail\.|googleapis\./i.test(lower);
+}
+
+/** On search page: get first organic link from DOM (elements are in DOM order). Bypasses semantic choices. */
+function getFirstOrganicLinkFromPage(
+  state: LoopState,
+): { action: BrowserAction; label: string; elementId: string } | null {
+  const elements = state.observation.elements;
+  for (const el of elements) {
+    const href = el.href;
+    if (!href) continue;
+    if (el.tag !== "a" && el.role !== "link") continue;
+    if (!isOrganicLink(href)) continue;
+    const normalized = normalizeUrlForTried(href);
+    if (state.triedDestinationUrls.has(normalized)) continue;
+    const label = [el.text, el.ariaLabel].filter(Boolean).join(" ").trim().slice(0, 80) || href;
+    return {
+      action: { type: "click" as const, elementId: el.id },
+      label,
+      elementId: el.id,
+    };
   }
   return null;
 }
@@ -743,6 +826,7 @@ export async function runAgentGraph(
   let resolvedGoal: string;
   let searchQuery: string | undefined = input.searchQuery;
   let planSteps: string[] = input.planSteps ?? [];
+  let completion_point: string | undefined = input.completion_point;
   if (input.resolvedGoal) {
     resolvedGoal = input.resolvedGoal;
     logRenderer("agentGraph", "using pre-resolved goal", { len: resolvedGoal.length });
@@ -760,10 +844,12 @@ export async function runAgentGraph(
     if (inferred.planSteps?.length) {
       planSteps = inferred.planSteps;
     }
+    completion_point = inferred.completion_point ?? completion_point;
     logRenderer("agentGraph", "intent inferred", {
       inferredGoalLen: inferred.inferredGoal.length,
       planLen: inferred.plan.length,
       planSteps: planSteps.length,
+      completion_point: completion_point?.slice(0, 60),
       searchQuery: searchQuery?.slice(0, 40),
     });
   }
@@ -771,6 +857,7 @@ export async function runAgentGraph(
   let state: LoopState = {
     goal: resolvedGoal,
     searchQuery,
+    completion_point,
     planSteps,
     planStepIndex: 0,
     mode: input.mode,
@@ -787,7 +874,6 @@ export async function runAgentGraph(
     finalAnswer: "",
     compactedContext: "",
     contextLedger: [],
-    bannedActions: new Set<string>(input.initialBannedActions ?? []),
     actionFailureStreak: {},
     noProgressCycles: 0,
     noProgressFallbacks: 0,
@@ -796,12 +882,11 @@ export async function runAgentGraph(
     prefetchedSemanticPromise: null,
     prefetchedSemanticFingerprint: null,
     decisionCache: new Map<string, LoopToolCall>(),
-    bannedChoiceIndices: new Set<number>(),
     pageStuckFingerprint: null,
     pageStuckSince: null,
     stepsWhenPageStuck: 0,
-    actionsOnCurrentPage: [],
     executedActions: [],
+    triedDestinationUrls: new Set<string>(),
     metrics: {
       semanticCalls: 0,
       planCalls: 0,
@@ -848,40 +933,6 @@ export async function runAgentGraph(
     );
   }
 
-  if (input.presavedPath && input.presavedPath.length > 0) {
-    state.timeline = pushTimeline(
-      state.timeline,
-      "plan",
-      `Using presaved path (${input.presavedPath.length} actions).`,
-    );
-    for (const action of input.presavedPath) {
-      if (input.signal?.aborted) {
-        state.completed = true;
-        state.finalAnswer = "Interrupted by user.";
-        break;
-      }
-      const exec = await executeActionWithRetries(deps, action, state.timeline);
-      state.timeline = exec.timeline;
-      state.executedActions = [...state.executedActions, action];
-      if (!exec.ok) {
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `Presaved path failed at step: ${exec.lastMessage}. Continuing with planning.`,
-        );
-        break;
-      }
-      state.steps += 1;
-      const observed = await deps.observe();
-      state.observation = observed;
-      state.observationFingerprint = getObservationFingerprint(observed);
-    }
-    if (state.steps === input.presavedPath.length) {
-      state.completed = true;
-      state.finalAnswer = "Completed using presaved path.";
-    }
-  }
-
   let transitions = 0;
   while (!state.completed && transitions < recursionLimit) {
     if (input.signal?.aborted) {
@@ -905,16 +956,10 @@ export async function runAgentGraph(
 
     if (detectStuckLoop(state) && deps.canGoBack?.() && deps.goBack) {
       const fromUrl = state.observation.url;
-      const toBan = [...state.actionsOnCurrentPage];
-      for (const sig of toBan) {
-        state.bannedActions.add(sig);
-      }
-      deps.onBannedActions?.(toBan);
-      state.goal = `${state.goal}\nDo NOT repeat the actions that led to the stuck page.`;
       state.timeline = pushTimeline(
         state.timeline,
         "plan",
-        `Stuck on same page for ${LOOP_STUCK_MS / 1000}s with steps increasing. Going back and banning ${toBan.length} action(s) to avoid same route.`,
+        `Stuck on same page for ${LOOP_STUCK_MS / 1000}s. Going back.`,
       );
       deps.goBack();
       await new Promise((r) => setTimeout(r, LOOP_GOBACK_WAIT_MS));
@@ -924,10 +969,9 @@ export async function runAgentGraph(
       state.pageStuckFingerprint = state.observationFingerprint;
       state.pageStuckSince = Date.now();
       state.stepsWhenPageStuck = state.steps;
-      state.actionsOnCurrentPage = [];
       state.lastSemanticFingerprint = "";
       state.decisionCache.clear();
-      state.contextLedger.push(`loop_recovery: went back from ${fromUrl} to ${observed.url}, banned ${toBan.length} action(s)`);
+      state.contextLedger.push(`loop_recovery: went back from ${fromUrl} to ${observed.url}`);
       continue;
     }
 
@@ -937,6 +981,32 @@ export async function runAgentGraph(
         "Stopped after max steps. Review the summary and continue if needed.";
       state.timeline = pushTimeline(state.timeline, "plan", "Reached max steps.");
       break;
+    }
+
+    if (state.completion_point && deps.isAtCompletionPoint) {
+      const atPoint = await deps.isAtCompletionPoint(state.observation, state.completion_point);
+      if (atPoint) {
+        state.timeline = pushTimeline(
+          state.timeline,
+          "plan",
+          `Reached completion point on ${state.observation.url}. Stopping.`,
+        );
+        state.completed = true;
+        state.finalAnswer = `Reached the target: ${state.observation.url}. The page is ready for you to view or download.`;
+        break;
+      }
+    } else if (deps.isGoalAchieved) {
+      const achieved = await deps.isGoalAchieved(state.observation, state.goal);
+      if (achieved) {
+        state.timeline = pushTimeline(
+          state.timeline,
+          "plan",
+          `Goal achieved on ${state.observation.url}. Stopping.`,
+        );
+        state.completed = true;
+        state.finalAnswer = `Found the target on ${state.observation.url}. The page is ready for you to view or download.`;
+        break;
+      }
     }
 
     const canReuseSemantic =
@@ -1004,7 +1074,7 @@ export async function runAgentGraph(
 
     if (state.noProgressCycles >= 2) {
       const fallbackAction = getNavigateFallbackAction(state);
-      if (fallbackAction && !state.bannedActions.has(getActionSignature(fallbackAction))) {
+      if (fallbackAction) {
         toolCall = {
           kind: "execute_action",
           action: fallbackAction,
@@ -1023,10 +1093,7 @@ export async function runAgentGraph(
     if (!toolCall) {
       const cachedCall = state.decisionCache.get(decisionKey);
       if (cachedCall) {
-        const shouldSkip =
-          cachedCall.kind === "execute_action" ||
-          (cachedCall.kind === "execute_mcp" &&
-            state.bannedActions.has(`mcp:${cachedCall.call.server}/${cachedCall.call.name}`));
+        const shouldSkip = cachedCall.kind === "execute_action";
         if (!shouldSkip) {
           toolCall = cachedCall;
           state.metrics.planCacheHits += 1;
@@ -1063,6 +1130,59 @@ export async function runAgentGraph(
       }
     }
 
+    // On search results: always pick first organic result from DOM (not semantic choices); go back only when exhausted
+    if (!toolCall && /\/search/i.test(state.observation.url)) {
+      const firstLink = getFirstOrganicLinkFromPage(state);
+      const deterministic = firstLink
+        ? {
+            action: firstLink.action,
+            label: firstLink.label,
+            choiceIndex: undefined as number | undefined,
+            source: "deterministic first search result",
+          }
+        : pickDeterministicAction(state);
+      if (deterministic) {
+        toolCall = {
+          kind: "execute_action",
+          action: deterministic.action,
+          source: deterministic.source,
+          label: deterministic.label,
+          choiceIndex: deterministic.choiceIndex,
+        };
+        state.metrics.fastPathDecisions += 1;
+        if (deterministic.choiceIndex != null) {
+          state.lastOfferedChoiceIndex = deterministic.choiceIndex;
+        }
+        state.timeline = pushTimeline(
+          state.timeline,
+          "plan",
+          `First search result: ${deterministic.label ?? deterministic.source}`,
+        );
+      } else if (deps.canGoBack?.() && deps.goBack) {
+        state.timeline = pushTimeline(
+          state.timeline,
+          "plan",
+          `All search results tried and irrelevant. Going back.`,
+        );
+        deps.goBack();
+        await new Promise((r) => setTimeout(r, LOOP_GOBACK_WAIT_MS));
+        const reobserved = await deps.observe();
+        state.observation = reobserved;
+        state.observationFingerprint = getObservationFingerprint(reobserved);
+        state.lastSemanticFingerprint = "";
+        state.decisionCache.clear();
+        state.contextLedger.push(
+          `search_exhausted: went back from ${state.observation.url}`,
+        );
+        state.timeline = pushTimeline(
+          state.timeline,
+          "observe",
+          `Back at ${reobserved.url}.`,
+        );
+        continue;
+      }
+    }
+
     if (!toolCall) {
       const assembledGoal = buildPromptGoal(state, input);
       state.timeline = pushTimeline(
@@ -1076,13 +1196,16 @@ export async function runAgentGraph(
         `prompt: sidebarTools=${state.availableActions.length}, mcpTools=${state.availableMcpTools.length}, step=${state.currentStep}`,
       );
 
+      const actionsForPlan = state.availableActions;
       const planInput: PlanActionInput = {
         goal: assembledGoal,
         observation: state.observation,
         timeline: state.timeline,
-        availableActions: state.availableActions,
+        availableActions: actionsForPlan,
         availableMcpTools: state.availableMcpTools,
         currentStep: state.currentStep,
+        planSteps: state.planSteps,
+        planStepIndex: state.planStepIndex,
       };
 
       state.metrics.planCalls += 1;
@@ -1103,7 +1226,7 @@ export async function runAgentGraph(
 
       toolCall = resolveToolCallFromPlan(
         plan,
-        state.availableActions,
+        actionsForPlan,
         state.availableMcpTools,
       );
       if (toolCall.kind === "execute_mcp") {
@@ -1295,38 +1418,8 @@ export async function runAgentGraph(
       }
     }
 
-    const initialAction = toolCall.action;
-    let action = initialAction;
-    let signature = getActionSignature(action);
-
-    if (state.bannedActions.has(signature)) {
-      const alternative = pickAlternativeAction(state.availableActions, state.bannedActions);
-      if (alternative) {
-        action = alternative.action;
-        signature = getActionSignature(action);
-        toolCall = {
-          kind: "execute_action",
-          action,
-          source: `banned-action bypass -> option ${alternative.index}`,
-          label: alternative.label,
-          choiceIndex: alternative.index,
-        };
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `Selected action was banned. Switching to option ${alternative.index} (${alternative.label}).`,
-        );
-      } else {
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          "Selected action is banned and no alternative is available. Replanning.",
-        );
-        state.goal = `${state.goal}\nAvoid action ${describeAction(initialAction)}.`;
-        continue;
-      }
-    }
-
+    const action = toolCall.action;
+    const signature = getActionSignature(action);
     const actionDesc = describeAction(action);
     state.contextLedger.push(`tool_call: execute_action ${actionDesc}`);
 
@@ -1382,17 +1475,6 @@ export async function runAgentGraph(
       const nextStreak = (state.actionFailureStreak[signature] ?? 0) + 1;
       state.actionFailureStreak[signature] = nextStreak;
 
-      if (nextStreak >= 2) {
-        state.bannedActions.add(signature);
-        state.decisionCache.clear();
-        state.timeline = pushTimeline(
-          state.timeline,
-          "plan",
-          `Loop breaker: banning action for this run (${actionDesc}).`,
-        );
-        state.goal = `${state.goal}\nDo not use action ${actionDesc}; it failed repeatedly.`;
-      }
-
       if (exec.reason === "target_not_found") {
         state.decisionCache.clear();
         state.timeline = pushTimeline(
@@ -1445,11 +1527,6 @@ export async function runAgentGraph(
       state.noProgressCycles = nextFingerprint === prevFingerprint ? state.noProgressCycles + 1 : 0;
       state.observation = observed;
       state.observationFingerprint = nextFingerprint;
-      if (nextFingerprint !== prevFingerprint) {
-        state.actionsOnCurrentPage = [signature];
-      } else {
-        state.actionsOnCurrentPage = [...state.actionsOnCurrentPage, signature];
-      }
       if (
         nextFingerprint !== prevFingerprint &&
         state.planSteps.length > 0 &&
@@ -1475,6 +1552,78 @@ export async function runAgentGraph(
       state.contextLedger.push(
         `observe: ${observed.url} (${observed.elements.length} elements, noProgress=${state.noProgressCycles})`,
       );
+
+      if (
+        nextFingerprint !== prevFingerprint &&
+        (action.type === "navigate" || action.type === "click") &&
+        deps.isPageRelevantToGoal &&
+        deps.canGoBack?.() &&
+        deps.goBack
+      ) {
+        // Wait 5s for page to load before judging relevance (don't be eager to go back)
+        await new Promise((r) => setTimeout(r, 5000));
+        observed = await withTimeout(
+          deps.observe(),
+          deps.verifyTimeoutMs,
+          `Relevance check observe timed out`,
+        );
+        state.observation = observed;
+        state.observationFingerprint = getObservationFingerprint(observed);
+        const relevant = await deps.isPageRelevantToGoal(observed, state.goal, {
+          planSteps: state.planSteps,
+          planStepIndex: state.planStepIndex,
+        });
+        if (!relevant) {
+          state.triedDestinationUrls.add(normalizeUrlForTried(observed.url));
+          state.timeline = pushTimeline(
+            state.timeline,
+            "plan",
+            `Page not relevant to goal. Going back to try a different option.`,
+          );
+          deps.goBack();
+          await new Promise((r) => setTimeout(r, LOOP_GOBACK_WAIT_MS));
+          const reobserved = await deps.observe();
+          state.observation = reobserved;
+          state.observationFingerprint = getObservationFingerprint(reobserved);
+          state.lastSemanticFingerprint = "";
+          state.decisionCache.clear();
+          state.contextLedger.push(
+            `page_relevance: went back from irrelevant ${observed.url}`,
+          );
+          state.timeline = pushTimeline(
+            state.timeline,
+            "observe",
+            `Back at ${reobserved.url}. Trying a different option.`,
+          );
+          continue;
+        }
+      }
+
+      if (state.completion_point && deps.isAtCompletionPoint) {
+        const atPoint = await deps.isAtCompletionPoint(state.observation, state.completion_point);
+        if (atPoint) {
+          state.timeline = pushTimeline(
+            state.timeline,
+            "plan",
+            `Reached completion point on ${state.observation.url}. Stopping.`,
+          );
+          state.completed = true;
+          state.finalAnswer = `Reached the target: ${state.observation.url}. The page is ready for you to view or download.`;
+          break;
+        }
+      } else if (deps.isGoalAchieved) {
+        const achieved = await deps.isGoalAchieved(state.observation, state.goal);
+        if (achieved) {
+          state.timeline = pushTimeline(
+            state.timeline,
+            "plan",
+            `Goal achieved on ${state.observation.url}. Stopping.`,
+          );
+          state.completed = true;
+          state.finalAnswer = `Found the target on ${state.observation.url}. The page is ready for you to view or download.`;
+          break;
+        }
+      }
 
       if (deps.fastMode && nextFingerprint !== state.lastSemanticFingerprint) {
         const goalSnapshot = state.goal;
