@@ -122,8 +122,8 @@ body {
   flex-shrink: 0;
 }
 
-/* Push status badge (and everything after it) to the right */
-.panelHeader .statusBadge {
+/* Push TTS toggle to the right */
+.panelHeader .ttsToggle {
   margin-left: auto;
 }
 
@@ -176,12 +176,21 @@ body {
 }
 
 /* ── Chat bubbles ── */
+@keyframes bubbleIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 .bubble {
   border-radius: 14px;
   padding: 12px 14px;
   border-left: 5px solid;
   background: var(--bubble-agent-bg);
   border-color: var(--bubble-agent-border);
+}
+
+.bubble--in {
+  animation: bubbleIn 0.22s ease-out both;
 }
 
 .bubble--agent  { background: var(--bubble-agent-bg); border-color: var(--bubble-agent-border); }
@@ -465,32 +474,52 @@ body {
 
 .confirmBtn--cancel:hover { background: #fff5f5; }
 
-/* ── Activity status (live) ── */
-.activityStatus {
+/* ── Activity status (live) — typing indicator ── */
+@keyframes typingBounce {
+  0%, 60%, 100% { transform: translateY(0); }
+  30%           { transform: translateY(-6px); }
+}
+
+.typingBubble {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+  border-radius: 14px;
+  background: var(--bubble-agent-bg);
+  border-left: 5px solid var(--bubble-agent-border);
+  animation: bubbleIn 0.22s ease-out both;
+}
+
+.typingLabel {
+  font-size: 0.8rem;
+  font-weight: 900;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.typingDots {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-radius: 12px;
-  background: #fdf8ec;
-  border: 2px solid #c8a225;
+  gap: 6px;
+  height: 24px;
 }
 
-.activitySpinner {
-  width: 22px;
-  height: 22px;
-  border: 3px solid #e0d0a0;
-  border-top-color: #7d5a00;
+.typingDot {
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  flex-shrink: 0;
-  animation: spin 0.8s linear infinite;
+  background: var(--accent);
+  animation: typingBounce 1.2s ease-in-out infinite;
 }
 
-@keyframes spin { to { transform: rotate(360deg); } }
+.typingDot:nth-child(2) { animation-delay: 0.2s; }
+.typingDot:nth-child(3) { animation-delay: 0.4s; }
 
-.activityText {
-  font-size: 0.95rem;
-  color: #5a3e00;
+.typingStep {
+  font-size: 0.88rem;
+  color: var(--text-muted);
   font-weight: 600;
   line-height: 1.4;
   overflow: hidden;

@@ -258,9 +258,6 @@ export function AssistantPanel({
       {/* ── Header ── */}
       <div className="panelHeader">
         <h1 className="panelTitle">SteadyHands</h1>
-        <span className={`statusBadge ${isBusy ? "statusBadge--busy" : "statusBadge--ready"}`}>
-          {isBusy ? "Working…" : "Ready"}
-        </span>
         <label className="ttsToggle" title={ttsEnabled ? "Voice responses on — tap to turn off" : "Voice responses off — tap to turn on"}>
           <span className="ttsToggleIcon">{isSpeaking ? "🔊" : "🔇"}</span>
           <span className="ttsToggleLabel">{ttsEnabled ? "Voice On" : "Voice Off"}</span>
@@ -289,7 +286,7 @@ export function AssistantPanel({
         {chatMessages.map((msg, i) => (
           <div
             key={`${msg.ts}-${i}`}
-            className={`bubble bubble--${msg.role === "agent" ? "agent" : msg.role === "user" ? "user" : "system"}`}
+            className={`bubble bubble--${msg.role === "agent" ? "agent" : msg.role === "user" ? "user" : "system"} bubble--in`}
           >
             <span className="bubbleLabel">
               {msg.role === "agent" ? "Assistant" : msg.role === "user" ? "You" : null}
@@ -364,11 +361,18 @@ export function AssistantPanel({
           </div>
         ) : null}
 
-        {/* Live activity status */}
-        {isBusy && latestActivity ? (
-          <div className="activityStatus">
-            <span className="activitySpinner" aria-hidden="true" />
-            <span className="activityText">{latestActivity.message}</span>
+        {/* Live activity status — typing indicator */}
+        {isBusy ? (
+          <div className="typingBubble" aria-label="Assistant is working">
+            <span className="typingLabel">Assistant</span>
+            <div className="typingDots">
+              <span className="typingDot" />
+              <span className="typingDot" />
+              <span className="typingDot" />
+            </div>
+            {latestActivity ? (
+              <span className="typingStep">{latestActivity.message}</span>
+            ) : null}
           </div>
         ) : null}
       </div>
