@@ -87,7 +87,9 @@ export function AssistantPanel({
   isSpeaking,
 }: Props) {
   const feedRef = useRef<HTMLDivElement | null>(null);
+  const thinkingStepsRef = useRef<HTMLDivElement | null>(null);
 
+  const [thinkingOpen, setThinkingOpen] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -208,6 +210,12 @@ export function AssistantPanel({
       feedRef.current.scrollTop = feedRef.current.scrollHeight;
     }
   }, [chatMessages, timeline, pendingQuestion, summary, finalAnswer]);
+
+  useEffect(() => {
+    if (thinkingOpen && thinkingStepsRef.current) {
+      thinkingStepsRef.current.scrollTop = thinkingStepsRef.current.scrollHeight;
+    }
+  }, [timeline, thinkingOpen]);
 
   // Determine what textarea and primary action to show
   const isBusy = running || intentInferring || isTranscribing;
@@ -361,17 +369,48 @@ export function AssistantPanel({
           </div>
         ) : null}
 
-        {/* Live activity status — typing indicator */}
-        {isBusy ? (
-          <div className="typingBubble" aria-label="Assistant is working">
-            <span className="typingLabel">Assistant</span>
-            <div className="typingDots">
-              <span className="typingDot" />
-              <span className="typingDot" />
-              <span className="typingDot" />
-            </div>
-            {latestActivity ? (
-              <span className="typingStep">{latestActivity.message}</span>
+        {/* Thinking collapsible — groups all reasoning steps */}
+        {(isBusy || timeline.length > 0) ? (
+          <div className="thinkingCollapsible">
+            <button
+              className="thinkingHeader"
+              type="button"
+              onClick={() => setThinkingOpen(o => !o)}
+              aria-expanded={thinkingOpen}
+            >
+              <span className="thinkingHeaderLeft">
+                <span className={`thinkingSpinnerWrap${isBusy ? " thinkingSpinnerWrap--active" : ""}`}>
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+                    <path d="M12 2 C12 7 17 12 22 12 C17 12 12 17 12 22 C12 17 7 12 2 12 C7 12 12 7 12 2 Z" />
+                  </svg>
+                </span>
+                <span className="thinkingLabel">
+                  {thinkingOpen ? "Hide thinking" : "Show thinking"}
+                </span>
+                {!thinkingOpen && latestActivity && isBusy ? (
+                  <span className="thinkingCurrentStep">{latestActivity.message}</span>
+                ) : null}
+              </span>
+              <span className={`thinkingChevron${thinkingOpen ? " thinkingChevron--open" : ""}`} aria-hidden="true">
+                ▾
+              </span>
+            </button>
+            {thinkingOpen ? (
+              <div className="thinkingSteps" ref={thinkingStepsRef}>
+                {timeline.map((event, i) => (
+                  <div key={`${event.ts}-${i}`} className={`thinkingStep thinkingStep--${event.kind}`}>
+                    <span className="thinkingStepKind">{event.kind}</span>
+                    <span className="thinkingStepText">{event.message}</span>
+                  </div>
+                ))}
+                {isBusy ? (
+                  <div className="thinkingStepLive">
+                    <span className="typingDot" />
+                    <span className="typingDot" />
+                    <span className="typingDot" />
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </div>
         ) : null}

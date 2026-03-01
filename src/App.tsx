@@ -94,22 +94,12 @@ export default function App() {
     const ts = new Date().toISOString();
     setTimeline((prev) => [...prev, { ts, kind, message }]);
 
-    // Mirror meaningful steps into the chat feed so the user can follow along
-    const prefix: Record<AgentTimelineEvent["kind"], string | null> = {
-      observe: "👀 Looking at page",
-      plan:    "🧠 Thinking",
-      act:     "🖱️ Doing",
-      verify:  "✅ Checking",
-      question:"❓ Question",
-      user:    null, // already shown as a user bubble
-      summary: null, // shown separately as page summary
-      error:   "⚠️ Error",
-    };
-    const label = prefix[kind];
-    if (label !== null) {
+    // Only surface hard errors into the main chat feed; all other steps live
+    // exclusively inside the "Show thinking" collapsible.
+    if (kind === "error") {
       setChatMessages((prev) => [
         ...prev,
-        { ts, role: "system" as const, text: `${label}: ${message}` },
+        { ts, role: "system" as const, text: `⚠️ Error: ${message}` },
       ]);
     }
   }, []);
