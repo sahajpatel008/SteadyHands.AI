@@ -2,10 +2,21 @@
 
 import { useState, useRef, useEffect } from "react";
 
+type Option = {
+  name: string;
+  description?: string;
+  rating?: string;
+  price?: string;
+};
+
+type MessageType = "default" | "clarification" | "options";
+
 type Message = {
   role: "user" | "assistant";
   content: string;
+  type?: MessageType;
   suggestions?: string[];
+  options?: Option[];
 };
 
 type AppState = "url-input" | "connecting" | "chat" | "acting";
@@ -50,9 +61,9 @@ export default function Home() {
     }
   };
 
-  const handleSendMessage = async () => {
-    if (!input.trim() || !sessionId) return;
-    const userMessage = input.trim();
+  const handleSendMessage = async (overrideInput?: string) => {
+    const userMessage = (overrideInput ?? input).trim();
+    if (!userMessage || !sessionId) return;
     setInput("");
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
     setAppState("acting");
@@ -64,31 +75,53 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId, userGoal: userMessage }),
       });
-      if (!res.ok) throw new Error("Server error");
-      const data = await res.json();
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: data.description,
-          suggestions: data.suggestions,
-        },
-      ]);
+
+      let data: any;
+      try { data = await res.json(); } catch { data = { error: `HTTP ${res.status}` }; }
+
+      if (!res.ok) {
+        const errMsg = data.error ?? "Server error";
+        setMessages((prev) => [...prev, { role: "assistant", content: `⚠️ ${errMsg}`, type: "default" }]);
+        setAppState("chat");
+        return;
+      }
+
+      if (data.status === "needs_clarification") {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: data.question, type: "clarification" },
+        ]);
+      } else {
+        // action_complete
+        const msgType: MessageType = data.extracted_options?.length ? "options" : "default";
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: data.description ?? "Done!",
+            type: msgType,
+            suggestions: data.suggestions,
+            options: data.extracted_options,
+          },
+        ]);
+      }
+
       setAppState("chat");
-    } catch (_) {
+    } catch (err: any) {
       setMessages((prev) => [
         ...prev,
-        {
-          role: "assistant",
-          content: "Sorry, I couldn't complete that action. Please try again or rephrase.",
-        },
+        { role: "assistant", content: "Sorry, I couldn't complete that action. Please try again.", type: "default" },
       ]);
       setAppState("chat");
     }
   };
 
   const handleSuggestionClick = (suggestion: string) => {
-    setInput(suggestion);
+    handleSendMessage(suggestion);
+  };
+
+  const handleOptionClick = (optionName: string) => {
+    handleSendMessage(`Select ${optionName}`);
   };
 
   const handleEndSession = async () => {
@@ -158,28 +191,64 @@ export default function Home() {
               <div className="flex-1 overflow-y-auto space-y-6 pb-4">
                 {messages.map((msg, i) => (
                   <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                    <div
-                      className={`max-w-[85%] rounded-2xl px-6 py-5 ${
-                        msg.role === "user"
-                          ? "bg-yellow-400 text-black"
-                          : "bg-gray-800 text-white"
-                      }`}
-                    >
-                      <p className="text-2xl font-semibold">{msg.content}</p>
-                      {msg.suggestions && msg.suggestions.length > 0 && (
-                        <div className="mt-4 flex flex-wrap gap-3">
-                          {msg.suggestions.map((s, j) => (
+                    {/* Clarification message */}
+                    {msg.type === "clarification" ? (
+                      <div className="max-w-[85%] rounded-2xl border-4 border-yellow-400 bg-gray-900 px-6 py-5">
+                        <div className="flex items-center gap-3 mb-3">
+                          <span className="text-4xl">🎤</span>
+                          <span className="text-lg font-black text-yellow-400 uppercase tracking-wide">I need more info</span>
+                        </div>
+                        <p className="text-2xl font-semibold text-white">{msg.content}</p>
+                      </div>
+                    ) : msg.type === "options" && msg.options && msg.options.length > 0 ? (
+                      /* Options grid message */
+                      <div className="max-w-[95%] w-full">
+                        <p className="text-xl font-semibold text-gray-300 mb-3">{msg.content}</p>
+                        <div className="grid grid-cols-1 gap-3">
+                          {msg.options.map((opt, j) => (
                             <button
                               key={j}
-                              onClick={() => handleSuggestionClick(s)}
-                              className="rounded-xl border-2 border-yellow-400 px-4 py-2 text-lg font-bold text-yellow-400 hover:bg-yellow-400 hover:text-black transition-colors"
+                              onClick={() => handleOptionClick(opt.name)}
+                              className="w-full rounded-2xl border-4 border-gray-600 bg-gray-800 px-6 py-5 text-left hover:border-yellow-400 hover:bg-gray-700 transition-colors"
                             >
-                              {s}
+                              <p className="text-2xl font-black text-white">{opt.name}</p>
+                              {opt.description && <p className="text-lg text-gray-400 mt-1">{opt.description}</p>}
+                              <div className="flex gap-4 mt-2">
+                                {opt.rating && <span className="text-yellow-400 font-bold">⭐ {opt.rating}</span>}
+                                {opt.price && <span className="text-green-400 font-bold">{opt.price}</span>}
+                              </div>
                             </button>
                           ))}
                         </div>
-                      )}
-                    </div>
+                        {msg.suggestions && msg.suggestions.length > 0 && (
+                          <div className="mt-4 flex flex-wrap gap-3">
+                            {msg.suggestions.map((s, j) => (
+                              <button key={j} onClick={() => handleSuggestionClick(s)}
+                                className="rounded-xl border-2 border-yellow-400 px-4 py-2 text-lg font-bold text-yellow-400 hover:bg-yellow-400 hover:text-black transition-colors">
+                                {s}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      /* Default message */
+                      <div className={`max-w-[85%] rounded-2xl px-6 py-5 ${
+                        msg.role === "user" ? "bg-yellow-400 text-black" : "bg-gray-800 text-white"
+                      }`}>
+                        <p className="text-2xl font-semibold">{msg.content}</p>
+                        {msg.suggestions && msg.suggestions.length > 0 && (
+                          <div className="mt-4 flex flex-wrap gap-3">
+                            {msg.suggestions.map((s, j) => (
+                              <button key={j} onClick={() => handleSuggestionClick(s)}
+                                className="rounded-xl border-2 border-yellow-400 px-4 py-2 text-lg font-bold text-yellow-400 hover:bg-yellow-400 hover:text-black transition-colors">
+                                {s}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ))}
                 {appState === "acting" && (
@@ -208,7 +277,7 @@ export default function Home() {
                     className="flex-1 rounded-2xl border-4 border-yellow-400 bg-black p-5 text-2xl text-white placeholder-gray-500 focus:outline-none focus:ring-4 focus:ring-yellow-400 disabled:opacity-50"
                   />
                   <button
-                    onClick={handleSendMessage}
+                    onClick={() => handleSendMessage()}
                     disabled={!input.trim() || appState === "acting"}
                     className="rounded-2xl bg-yellow-400 px-8 text-2xl font-black text-black transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
                   >
