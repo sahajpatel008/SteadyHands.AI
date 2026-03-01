@@ -64,6 +64,8 @@ type GraphDeps = {
   fastMode: boolean;
   enableSafetyGuardrails: boolean;
   requireApprovalForRiskyActions: boolean;
+  /** Called in real-time as each timeline event is emitted */
+  onEvent?: (kind: AgentTimelineEvent["kind"], message: string) => void;
 };
 
 type LoopToolCall =
@@ -156,11 +158,15 @@ function percentile(values: number[], p: number): number {
   return sorted[index];
 }
 
+// Module-level sink so the pure pushTimeline helper can fire realtime callbacks
+let _activeOnEvent: ((kind: AgentTimelineEvent["kind"], message: string) => void) | undefined;
+
 function pushTimeline(
   timeline: AgentTimelineEvent[],
   kind: AgentTimelineEvent["kind"],
   message: string,
 ): AgentTimelineEvent[] {
+  _activeOnEvent?.(kind, message);
   return [
     ...timeline,
     {
@@ -793,6 +799,9 @@ export async function runAgentGraph(
     goal: input.goal?.slice(0, 60),
     mode: input.mode,
   });
+
+  // Wire up realtime event callback for the duration of this run
+  _activeOnEvent = deps.onEvent;
 
   const hasStepLimit = Number.isFinite(deps.maxSteps) && deps.maxSteps > 0;
   const recursionLimit = hasStepLimit ? Math.max(120, deps.maxSteps * 12 + 40) : 400;
@@ -1704,6 +1713,8 @@ export async function runAgentGraph(
       planCacheHits: state.metrics.planCacheHits,
     },
   });
+
+  _activeOnEvent = undefined;
 
   return {
     completed: state.completed,

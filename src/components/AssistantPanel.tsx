@@ -272,7 +272,7 @@ export function AssistantPanel({
             className={`bubble bubble--${msg.role === "agent" ? "agent" : msg.role === "user" ? "user" : "system"}`}
           >
             <span className="bubbleLabel">
-              {msg.role === "agent" ? "Assistant" : msg.role === "user" ? "You" : "Info"}
+              {msg.role === "agent" ? "Assistant" : msg.role === "user" ? "You" : null}
             </span>
             <p className="bubbleText">{msg.text}</p>
           </div>
