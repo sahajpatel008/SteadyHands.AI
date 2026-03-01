@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SteadyHands.AI — Session Tester</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f0f0f;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem;
+    }
+    h1 { margin-bottom: .25rem; font-size: 1.6rem; color: #fff; }
+    .subtitle { color: #888; margin-bottom: 2rem; font-size: .9rem; }
+
+    .card {
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      border-radius: 12px;
+      padding: 1.5rem;
+      width: 100%;
+      max-width: 600px;
+      margin-bottom: 1rem;
+    }
+    .card h2 {
+      font-size: 1rem;
+      color: #aaa;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+    }
+    .card h2 .step {
+      background: #333;
+      color: #fff;
+      border-radius: 50%;
+      width: 24px;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: .75rem;
+      font-weight: 700;
+    }
+    .card.active { border-color: #4f8cff; }
+    .card.done { border-color: #2ea043; opacity: .7; }
+    .card.disabled { opacity: .4; pointer-events: none; }
+
+    label { display: block; font-size: .85rem; color: #999; margin-bottom: .3rem; }
+    input[type="text"] {
+      width: 100%;
+      padding: .6rem .8rem;
+      border-radius: 8px;
+      border: 1px solid #333;
+      background: #111;
+      color: #fff;
+      font-size: .95rem;
+      outline: none;
+      margin-bottom: .75rem;
+    }
+    input[type="text"]:focus { border-color: #4f8cff; }
+
+    button {
+      padding: .6rem 1.2rem;
+      border: none;
+      border-radius: 8px;
+      font-size: .9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .btn-primary { background: #4f8cff; color: #fff; }
+    .btn-primary:hover { background: #3a75e0; }
+    .btn-primary:disabled { background: #333; color: #666; cursor: not-allowed; }
+    .btn-danger { background: #da3633; color: #fff; }
+    .btn-danger:hover { background: #b62d2b; }
+    .btn-secondary { background: #2a2a2a; color: #ccc; margin-left: .5rem; }
+    .btn-secondary:hover { background: #3a3a3a; }
+
+    .session-id {
+      font-family: 'Courier New', monospace;
+      font-size: .8rem;
+      color: #4f8cff;
+      background: #1e2a3a;
+      padding: .3rem .6rem;
+      border-radius: 6px;
+      margin-top: .5rem;
+      display: inline-block;
+      word-break: break-all;
+    }
+
+    .log {
+      background: #111;
+      border: 1px solid #222;
+      border-radius: 8px;
+      padding: 1rem;
+      max-height: 400px;
+      overflow-y: auto;
+      font-size: .85rem;
+      line-height: 1.6;
+      width: 100%;
+      max-width: 600px;
+    }
+    .log-entry {
+      padding: .4rem 0;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    .log-entry:last-child { border-bottom: none; }
+    .log-entry .time { color: #555; font-size: .75rem; margin-right: .5rem; }
+    .log-entry.error { color: #f85149; }
+    .log-entry.success { color: #3fb950; }
+    .log-entry.info { color: #58a6ff; }
+
+    .suggestions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .5rem;
+      margin-top: .75rem;
+    }
+    .suggestion-chip {
+      background: #1e2a3a;
+      color: #58a6ff;
+      border: 1px solid #2a3a4a;
+      border-radius: 20px;
+      padding: .3rem .8rem;
+      font-size: .8rem;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .suggestion-chip:hover { background: #2a3a5a; }
+
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid #333;
+      border-top-color: #4f8cff;
+      border-radius: 50%;
+      animation: spin .6s linear infinite;
+      margin-left: .5rem;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      margin-bottom: 1.5rem;
+      width: 100%;
+      max-width: 600px;
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #555;
+    }
+    .status-dot.connected { background: #3fb950; }
+    .status-text { font-size: .85rem; color: #888; }
+  </style>
+</head>
+<body>
+
+  <h1>🤖 SteadyHands.AI</h1>
+  <p class="subtitle">Session-based browser automation tester</p>
+
+  <!-- Status -->
+  <div class="status-bar">
+    <div class="status-dot" id="statusDot"></div>
+    <span class="status-text" id="statusText">No active session</span>
+  </div>
+
+  <!-- Step 1: Start Session -->
+  <div class="card active" id="card-start">
+    <h2><span class="step">1</span> Start Session</h2>
+    <label for="targetUrl">Target URL</label>
+    <input type="text" id="targetUrl" placeholder="https://www.google.com" value="https://www.google.com" />
+    <button class="btn-primary" id="btnStart" onclick="startSession()">Open Browser</button>
+    <div id="sessionInfo" style="margin-top: .75rem;"></div>
+  </div>
+
+  <!-- Step 2: Perform Actions -->
+  <div class="card disabled" id="card-act">
+    <h2><span class="step">2</span> Perform Actions</h2>
+    <label for="userGoal">What do you want to do?</label>
+    <input type="text" id="userGoal" placeholder='e.g. Click the "Sign In" button' />
+    <button class="btn-primary" id="btnAct" onclick="performAction()">Run Action</button>
+    <div id="suggestions" class="suggestions"></div>
+  </div>
+
+  <!-- Step 3: Close Session -->
+  <div class="card disabled" id="card-close">
+    <h2><span class="step">3</span> Close Session</h2>
+    <p style="font-size: .85rem; color: #888; margin-bottom: .75rem;">Done testing? Close the browser session.</p>
+    <button class="btn-danger" id="btnClose" onclick="closeSession()">Close Browser</button>
+  </div>
+
+  <!-- Log -->
+  <h2 style="width:100%;max-width:600px;font-size:.9rem;color:#666;margin: 1rem 0 .5rem;">Activity Log</h2>
+  <div class="log" id="log"></div>
+
+<script>
+  const API = 'http://localhost:3001';
+  let sessionId = null;
+  let loading = false;
+
+  const $ = (id) => document.getElementById(id);
+
+  function setLoading(isLoading, btnId) {
+    loading = isLoading;
+    const btn = $(btnId);
+    if (isLoading) {
+      btn.disabled = true;
+      btn.dataset.text = btn.textContent;
+      btn.innerHTML = btn.textContent + '<span class="spinner"></span>';
+    } else {
+      btn.disabled = false;
+      btn.textContent = btn.dataset.text || btn.textContent;
+    }
+  }
+
+  function log(msg, type = '') {
+    const logEl = $('log');
+    const time = new Date().toLocaleTimeString();
+    const entry = document.createElement('div');
+    entry.className = `log-entry ${type}`;
+    entry.innerHTML = `<span class="time">${time}</span>${msg}`;
+    logEl.prepend(entry);
+  }
+
+  function updateCards() {
+    const start = $('card-start');
+    const act = $('card-act');
+    const close = $('card-close');
+    const dot = $('statusDot');
+    const status = $('statusText');
+
+    if (sessionId) {
+      start.className = 'card done';
+      act.className = 'card active';
+      close.className = 'card active';
+      dot.className = 'status-dot connected';
+      status.textContent = `Session active: ${sessionId.slice(0, 8)}…`;
+      $('btnStart').disabled = true;
+    } else {
+      start.className = 'card active';
+      act.className = 'card disabled';
+      close.className = 'card disabled';
+      dot.className = 'status-dot';
+      status.textContent = 'No active session';
+      $('btnStart').disabled = false;
+      $('sessionInfo').innerHTML = '';
+      $('suggestions').innerHTML = '';
+    }
+  }
+
+  async function startSession() {
+    const targetUrl = $('targetUrl').value.trim();
+    if (!targetUrl) { alert('Enter a URL'); return; }
+
+    setLoading(true, 'btnStart');
+    log(`Starting session → <strong>${targetUrl}</strong>`, 'info');
+
+    try {
+      const res = await fetch(`${API}/api/session/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetUrl })
+      });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error || 'Failed');
+
+      sessionId = data.sessionId;
+      $('sessionInfo').innerHTML = `<span class="session-id">${sessionId}</span>`;
+      log(`✅ Session started`, 'success');
+      updateCards();
+      $('userGoal').focus();
+
+    } catch (err) {
+      log(`❌ ${err.message}`, 'error');
+    } finally {
+      setLoading(false, 'btnStart');
+    }
+  }
+
+  async function performAction() {
+    const userGoal = $('userGoal').value.trim();
+    if (!userGoal) { alert('Enter an action'); return; }
+
+    setLoading(true, 'btnAct');
+    log(`🤖 Action: "<strong>${userGoal}</strong>"`, 'info');
+
+    try {
+      const res = await fetch(`${API}/api/session/act`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, userGoal })
+      });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error || 'Failed');
+
+      log(`✅ ${data.description}`, 'success');
+
+      // Show suggestions as clickable chips
+      const sugEl = $('suggestions');
+      sugEl.innerHTML = '';
+      if (data.suggestions && data.suggestions.length) {
+        data.suggestions.forEach(s => {
+          const chip = document.createElement('span');
+          chip.className = 'suggestion-chip';
+          chip.textContent = s;
+          chip.onclick = () => {
+            $('userGoal').value = s;
+            performAction();
+          };
+          sugEl.appendChild(chip);
+        });
+      }
+
+      $('userGoal').value = '';
+
+    } catch (err) {
+      log(`❌ ${err.message}`, 'error');
+      if (err.message.includes('Session not found')) {
+        sessionId = null;
+        updateCards();
+      }
+    } finally {
+      setLoading(false, 'btnAct');
+    }
+  }
+
+  async function closeSession() {
+    if (!sessionId) return;
+
+    setLoading(true, 'btnClose');
+    log('Closing session…', 'info');
+
+    try {
+      await fetch(`${API}/api/session/close`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId })
+      });
+      log('👋 Session closed', 'success');
+    } catch (err) {
+      log(`❌ ${err.message}`, 'error');
+    } finally {
+      sessionId = null;
+      setLoading(false, 'btnClose');
+      updateCards();
+    }
+  }
+
+  // Enter key triggers action
+  $('userGoal').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !loading) performAction();
+  });
+  $('targetUrl').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !loading) startSession();
+  });
+</script>
+</body>
+</html>
