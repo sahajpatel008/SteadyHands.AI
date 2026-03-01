@@ -164,6 +164,41 @@
     }
     .status-dot.connected { background: #3fb950; }
     .status-text { font-size: .85rem; color: #888; }
+
+    /* Inline result / error pane */
+    .result-pane {
+      display: none;
+      margin-top: 1rem;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid #2a2a2a;
+    }
+    .result-pane.visible { display: block; }
+    .result-pane .rp-header {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      padding: .5rem .75rem;
+      font-size: .75rem;
+      font-weight: 700;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .result-pane.rp-success .rp-header { background: #0d2818; color: #3fb950; border-bottom: 1px solid #1a3a20; }
+    .result-pane.rp-error   .rp-header { background: #2a0a0a; color: #f85149; border-bottom: 1px solid #4a1010; }
+    .result-pane .rp-body {
+      background: #111;
+      padding: .75rem;
+      font-size: .85rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 260px;
+      overflow-y: auto;
+      color: #ddd;
+    }
+    .result-pane.rp-error .rp-body { color: #f98f8f; font-family: 'Courier New', monospace; font-size: .8rem; }
+    .result-pane .rp-description { color: #e0e0e0; margin-bottom: .5rem; }
   </style>
 </head>
 <body>
@@ -192,6 +227,13 @@
     <label for="userGoal">What do you want to do?</label>
     <input type="text" id="userGoal" placeholder='e.g. Click the "Sign In" button' />
     <button class="btn-primary" id="btnAct" onclick="performAction()">Run Action</button>
+
+    <!-- Inline result / error pane -->
+    <div class="result-pane" id="resultPane">
+      <div class="rp-header" id="resultHeader"></div>
+      <div class="rp-body" id="resultBody"></div>
+    </div>
+
     <div id="suggestions" class="suggestions"></div>
   </div>
 
@@ -226,6 +268,20 @@
     }
   }
 
+  function showResult(type, header, body) {
+    const pane = $('resultPane');
+    const hdr  = $('resultHeader');
+    const bdy  = $('resultBody');
+    pane.className = `result-pane visible rp-${type}`;
+    hdr.textContent = header;
+    bdy.textContent = body;
+  }
+
+  function clearResult() {
+    const pane = $('resultPane');
+    pane.className = 'result-pane';
+  }
+
   function log(msg, type = '') {
     const logEl = $('log');
     const time = new Date().toLocaleTimeString();
@@ -258,6 +314,7 @@
       $('btnStart').disabled = false;
       $('sessionInfo').innerHTML = '';
       $('suggestions').innerHTML = '';
+      clearResult();
     }
   }
 
@@ -296,6 +353,7 @@
     if (!userGoal) { alert('Enter an action'); return; }
 
     setLoading(true, 'btnAct');
+    clearResult();
     log(`🤖 Action: "<strong>${userGoal}</strong>"`, 'info');
 
     try {
@@ -304,11 +362,22 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId, userGoal })
       });
-      const data = await res.json();
 
-      if (!res.ok) throw new Error(data.error || 'Failed');
+      let data;
+      try { data = await res.json(); } catch { data = { error: `HTTP ${res.status} — could not parse response` }; }
 
-      log(`✅ ${data.description}`, 'success');
+      if (!res.ok) {
+        const errMsg = data.error || `HTTP ${res.status}`;
+        showResult('error', '⚠ Error', errMsg);
+        log(`❌ ${errMsg}`, 'error');
+        if (errMsg.includes('Session not found')) { sessionId = null; updateCards(); }
+        return;
+      }
+
+      // Show inline result
+      const description = data.description || '(no description returned)';
+      showResult('success', '✅ Result', description);
+      log(`✅ ${description}`, 'success');
 
       // Show suggestions as clickable chips
       const sugEl = $('suggestions');
@@ -318,10 +387,7 @@
           const chip = document.createElement('span');
           chip.className = 'suggestion-chip';
           chip.textContent = s;
-          chip.onclick = () => {
-            $('userGoal').value = s;
-            performAction();
-          };
+          chip.onclick = () => { $('userGoal').value = s; performAction(); };
           sugEl.appendChild(chip);
         });
       }
@@ -329,11 +395,10 @@
       $('userGoal').value = '';
 
     } catch (err) {
-      log(`❌ ${err.message}`, 'error');
-      if (err.message.includes('Session not found')) {
-        sessionId = null;
-        updateCards();
-      }
+      const msg = err.message ?? String(err);
+      showResult('error', '⚠ Error', msg);
+      log(`❌ ${msg}`, 'error');
+      if (msg.includes('Session not found')) { sessionId = null; updateCards(); }
     } finally {
       setLoading(false, 'btnAct');
     }
