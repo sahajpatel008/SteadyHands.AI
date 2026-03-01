@@ -1154,3 +1154,45 @@ Answer:`;
   return achieved;
 }
 
+/** Map user's natural-language answer to a choice index (1-based) using semantic reasoning. */
+export async function resolveUserChoiceToIndex(
+  answer: string,
+  choices: SidebarChoice[],
+  question?: string,
+): Promise<number | null> {
+  const trimmed = answer.trim();
+  if (!trimmed || choices.length === 0) return null;
+
+  const choicesText = choices
+    .map((c, i) => `${i + 1}. ${c.label} — ${c.suggestedAction}`)
+    .join("\n");
+
+  const prompt = `The user was asked: "${question ?? "Which option?"}"
+
+Available options:
+${choicesText}
+
+User's response: "${trimmed}"
+
+Which option (1-${choices.length}) best matches what the user meant? Use semantic reasoning: "the first one", "search", "click continue", "I'll try the search box" etc. all map to the matching option.
+Return ONLY a JSON object: {"selectedIndex": N} where N is 1-based, or {"selectedIndex": null} if no clear match.`;
+
+  const content = buildContentParts(prompt);
+  const rawText = await chatCompletion(config.summarizerModel, content, {
+    maxTokens: 80,
+    disableThinking: true,
+  });
+  const text = stripThinkTags(rawText);
+  try {
+    const parsed = JSON.parse(text.replace(/.*?(\{[\s\S]*\}).*/, "$1"));
+    const n = parsed?.selectedIndex;
+    if (typeof n === "number" && n >= 1 && n <= choices.length) {
+      logMain("llm", "resolveUserChoiceToIndex", { answer: trimmed.slice(0, 40), selectedIndex: n });
+      return n;
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return null;
+}
+
