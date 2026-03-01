@@ -5,8 +5,17 @@ import { useState, useRef, useEffect } from "react";
 type Option = {
   name: string;
   description?: string;
+  url?: string;
+  file_type?: string;
   rating?: string;
   price?: string;
+};
+
+type ThinkingStep = {
+  step: number;
+  thought: string;
+  action_type: string;
+  action_instruction?: string | null;
 };
 
 type MessageType = "default" | "clarification" | "options";
@@ -17,6 +26,7 @@ type Message = {
   type?: MessageType;
   suggestions?: string[];
   options?: Option[];
+  thinking_steps?: ThinkingStep[];
 };
 
 type AppState = "url-input" | "connecting" | "chat" | "acting";
@@ -28,7 +38,16 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [expandedThinking, setExpandedThinking] = useState<Set<number>>(new Set());
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const toggleThinking = (idx: number) => {
+    setExpandedThinking(prev => {
+      const next = new Set(prev);
+      next.has(idx) ? next.delete(idx) : next.add(idx);
+      return next;
+    });
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -89,7 +108,7 @@ export default function Home() {
       if (data.status === "needs_clarification") {
         setMessages((prev) => [
           ...prev,
-          { role: "assistant", content: data.question, type: "clarification" },
+          { role: "assistant", content: data.question, type: "clarification", thinking_steps: data.thinking_steps },
         ]);
       } else {
         // action_complete
@@ -102,6 +121,7 @@ export default function Home() {
             type: msgType,
             suggestions: data.suggestions,
             options: data.extracted_options,
+            thinking_steps: data.thinking_steps,
           },
         ]);
       }
@@ -190,7 +210,44 @@ export default function Home() {
               {/* Messages */}
               <div className="flex-1 overflow-y-auto space-y-6 pb-4">
                 {messages.map((msg, i) => (
-                  <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                  <div key={i} className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"}`}>
+                    {/* Agent thinking trace */}
+                    {msg.role === "assistant" && msg.thinking_steps && msg.thinking_steps.length > 0 && (
+                      <div className="mb-2 w-full max-w-[90%]">
+                        <button
+                          onClick={() => toggleThinking(i)}
+                          className="flex items-center gap-2 text-sm font-semibold text-gray-500 hover:text-gray-300 transition-colors"
+                        >
+                          <span>🧠</span>
+                          <span>{expandedThinking.has(i) ? "Hide" : "Show"} reasoning ({msg.thinking_steps.length} step{msg.thinking_steps.length !== 1 ? "s" : ""})</span>
+                          <span className="text-xs">{expandedThinking.has(i) ? "▲" : "▼"}</span>
+                        </button>
+                        {expandedThinking.has(i) && (
+                          <div className="mt-2 rounded-xl border border-gray-700 bg-gray-950 p-4 space-y-3">
+                            {msg.thinking_steps.map((ts, j) => (
+                              <div key={j} className="flex gap-3">
+                                <span className="shrink-0 rounded-full bg-gray-800 px-2 py-0.5 text-xs font-black text-gray-400">Step {ts.step}</span>
+                                <div className="space-y-1">
+                                  <p className="text-sm text-gray-300">{ts.thought}</p>
+                                  {ts.action_instruction && (
+                                    <p className="font-mono text-xs text-yellow-500 bg-gray-900 rounded px-2 py-1">
+                                      {ts.action_type === 'act' ? '▶' : ts.action_type === 'surface_options' ? '📋' : '❓'} {ts.action_instruction}
+                                    </p>
+                                  )}
+                                  {!ts.action_instruction && (
+                                    <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                                      ts.action_type === 'surface_options' ? 'bg-green-900 text-green-400' :
+                                      ts.action_type === 'ask_human' ? 'bg-yellow-900 text-yellow-400' :
+                                      'bg-gray-800 text-gray-400'
+                                    }`}>{ts.action_type}</span>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     {/* Clarification message */}
                     {msg.type === "clarification" ? (
                       <div className="max-w-[85%] rounded-2xl border-4 border-yellow-400 bg-gray-900 px-6 py-5">

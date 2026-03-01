@@ -62,44 +62,126 @@ function createRawClient() {
   });
 }
 
-// ─── Planner: decides if goal is actionable or needs clarification ───
-async function callPlanner(
-  userMessage: string,
-  goal: string | null,
-  history: HistoryEntry[]
-): Promise<{ actionable: boolean; sub_step: string | null; clarification_question: string | null }> {
+// ─── ReAct agent constants ───
+const MAX_REACT_STEPS = 5;
+
+// ─── Page context schema (snapshotted before each reasoning step) ───
+const PageContextSchema = z.object({
+  page_title: z.string(),
+  current_url: z.string(),
+  page_summary: z.string().describe('1-2 sentence summary of what this page is and what it offers'),
+  has_search_bar: z.boolean(),
+  has_login_wall: z.boolean().describe('True if the page requires login before proceeding'),
+  has_download_link: z.boolean().describe('True if at least one downloadable file link is visible'),
+  interactive_elements: z.array(z.object({
+    type: z.enum(['button', 'link', 'input', 'dropdown', 'tab']),
+    text: z.string(),
+    purpose: z.string().describe('What this element does in one phrase'),
+  })).describe('Up to 15 most relevant interactive elements on the page'),
+  visible_results: z.array(z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    url: z.string().optional(),
+    file_type: z.string().optional().describe('e.g. PDF, DOCX, HTML'),
+    rating: z.string().optional(),
+    price: z.string().optional(),
+  })).optional().describe('Visible list items, search results, products, documents, or download links'),
+});
+type PageContext = z.infer<typeof PageContextSchema>;
+
+type ExtractedOption = {
+  name: string;
+  description?: string;
+  url?: string;
+  file_type?: string;
+  rating?: string;
+  price?: string;
+};
+
+type ReActStep = {
+  thought: string;
+  action_type: 'act' | 'surface_options' | 'ask_human';
+  action_instruction: string | null;
+  options: ExtractedOption[] | null;
+  question: string | null;
+};
+
+// ─── DOM snapshot via Stagehand extract ───
+async function getPageContext(stagehand: Stagehand): Promise<PageContext> {
+  return await stagehand.extract(
+    `Do not think or reason. Return ONLY valid JSON. Snapshot the current page: title, URL, 1-2 sentence summary, whether it has a search bar, login wall, download links, the up-to-15 most relevant interactive elements, and any visible results or list items relevant to a user task.`,
+    PageContextSchema
+  );
+}
+
+// ─── ReAct step: reason over DOM context and decide next action ───
+async function callReActStep(
+  goal: string,
+  history: HistoryEntry[],
+  pageContext: PageContext,
+  stepNum: number
+): Promise<ReActStep> {
   const openai = createRawClient();
   const historyText = history.map(h => `${h.role}: ${h.content}`).join('\n') || '(none)';
+  const stepsRemaining = MAX_REACT_STEPS - stepNum;
 
-  const systemPrompt = `You are a browser automation planner. Given a user goal and conversation history, decide if the goal is specific enough to act on immediately, or if you need more info.
+  const systemPrompt = `You are a DOM-aware browser automation agent. You see the current page state and must decide the single best next action toward the user's goal.
 
 Return ONLY valid JSON — no thinking, no explanation, no markdown:
 {
-  "actionable": true | false,
-  "sub_step": "single concrete browser action if actionable, else null",
-  "clarification_question": "what to ask the user if not actionable, else null"
+  "thought": "one sentence: what you see and why you chose this action",
+  "action_type": "act" | "surface_options" | "ask_human",
+  "action_instruction": "precise Stagehand browser instruction, or null",
+  "options": [{"name": "", "description": "", "url": "", "file_type": "", "rating": "", "price": ""}] or null,
+  "question": "question for the user, or null"
 }
 
-Rules:
-- If the goal is specific enough, set actionable: true and provide a single sub_step (e.g. "Type 'Ethiopian food' into the search bar and press Enter").
-- If the goal is vague or missing required info, set actionable: false and provide a clarification_question.
-- sub_step must be ONE concrete browser action.`;
+Decision rules (strict priority order):
+1. SURFACE_OPTIONS — visible_results on the page are directly relevant to the goal (search results, PDF links, product listings, download buttons). Return them immediately. Do NOT keep navigating when results are already visible.
+2. ACT — there is a clearly useful interactive element (search bar, navigation link, relevant button). Generate ONE precise Stagehand instruction e.g. "Type '1040-SR' into the search bar and press Enter" or "Click the link that says 'Forms & Publications'".
+3. ASK_HUMAN — ONLY if has_login_wall is true, or there are zero relevant interactive elements. NEVER ask just because the goal is vague — try to act first.
+
+${stepsRemaining === 1 ? 'IMPORTANT: This is your LAST step. You MUST choose surface_options or ask_human — do NOT choose act.' : ''}
+
+Field rules:
+- act: set action_instruction, set options=null, set question=null
+- surface_options: set options from visible_results (include url and file_type when available), set action_instruction=null, set question=null
+- ask_human: set question, set action_instruction=null, set options=null`;
+
+  const userContent = `Goal: ${goal}
+
+Current page:
+- Title: ${pageContext.page_title}
+- URL: ${pageContext.current_url}
+- Summary: ${pageContext.page_summary}
+- has_search_bar: ${pageContext.has_search_bar}
+- has_login_wall: ${pageContext.has_login_wall}
+- has_download_link: ${pageContext.has_download_link}
+- Interactive elements: ${JSON.stringify(pageContext.interactive_elements)}
+- Visible results: ${JSON.stringify(pageContext.visible_results ?? [])}
+
+Conversation so far:
+${historyText}
+
+Step ${stepNum + 1} of ${MAX_REACT_STEPS}. Decide your next action.`;
 
   const response = await openai.chat.completions.create({
     model: AMD_LLM_MODEL,
     messages: [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: `Overall goal: ${goal ?? userMessage}\nConversation so far:\n${historyText}\nLatest message: ${userMessage}` },
+      { role: 'user', content: userContent },
     ],
     temperature: 0.1,
   });
 
   const raw = response.choices[0].message.content ?? '{}';
-  // Strip <think>...</think> blocks Qwen3 might emit
   const cleaned = raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-  // Extract first JSON object
   const match = cleaned.match(/\{[\s\S]*\}/);
-  return match ? JSON.parse(match[0]) : { actionable: true, sub_step: userMessage, clarification_question: null };
+  if (!match) {
+    console.error('❌ callReActStep: no JSON found in response:', raw.slice(0, 200));
+    return { thought: 'Parse error', action_type: 'ask_human', action_instruction: null, options: null, question: 'I had trouble reading the page. Could you describe what you see?' };
+  }
+  return JSON.parse(match[0]) as ReActStep;
 }
 
 // ─── Twilio: confirm completed goal ───
@@ -251,71 +333,96 @@ app.post('/api/session/act', async (req, res) => {
   // Append user message to history
   session.history.push({ role: 'user', content: userGoal });
 
-  console.log(`🧠 Planner evaluating: "${userGoal}"`);
+  console.log(`\n🎯 Goal: "${session.goal}"`);
+  console.log(`💬 User: "${userGoal}"`);
 
   try {
-    // ─── PLANNER ───
-    const plan = await callPlanner(userGoal, session.goal, session.history);
-    console.log('🧠 Planner result:', JSON.stringify(plan));
+    // ─── ReAct LOOP (up to MAX_REACT_STEPS iterations) ───
+    type ThinkingStep = { step: number; thought: string; action_type: string; action_instruction: string | null };
+    const thinkingSteps: ThinkingStep[] = [];
 
-    if (!plan.actionable) {
-      const question = plan.clarification_question ?? 'Could you give me more details?';
-      session.history.push({ role: 'agent', content: `[clarification] ${question}` });
-      return res.json({ status: 'needs_clarification', question });
+    for (let stepNum = 0; stepNum < MAX_REACT_STEPS; stepNum++) {
+
+      // 1. Snapshot the live page via Stagehand extract
+      console.log(`\n🔍 Getting page context [step ${stepNum + 1}/${MAX_REACT_STEPS}]...`);
+      const pageContext = await getPageContext(session.stagehand);
+      console.log(`📄 Page: "${pageContext.page_title}" | ${pageContext.current_url}`);
+      console.log(`📊 search=${pageContext.has_search_bar} login_wall=${pageContext.has_login_wall} download=${pageContext.has_download_link} results=${pageContext.visible_results?.length ?? 0}`);
+
+      // 2. Ask the ReAct agent what to do next
+      const step = await callReActStep(session.goal ?? userGoal, session.history, pageContext, stepNum);
+      console.log(`🧠 Thought [${stepNum + 1}]: ${step.thought}`);
+      console.log(`🎬 Decision: ${step.action_type}`);
+
+      // Accumulate for frontend display
+      thinkingSteps.push({
+        step: stepNum + 1,
+        thought: step.thought,
+        action_type: step.action_type,
+        action_instruction: step.action_instruction ?? null,
+      });
+
+      // 3. Branch on the agent's decision
+
+      if (step.action_type === 'ask_human') {
+        const question = step.question ?? 'Could you give me more context?';
+        session.history.push({ role: 'agent', content: `[clarification] ${question}` });
+        return res.json({ status: 'needs_clarification', question, thinking_steps: thinkingSteps });
+      }
+
+      if (step.action_type === 'surface_options') {
+        const options: ExtractedOption[] = step.options ?? pageContext.visible_results ?? [];
+        const description = `Found ${options.length} result${options.length !== 1 ? 's' : ''} for your goal.`;
+        session.history.push({ role: 'agent', content: description });
+        const isComplete = options.length > 0 && (
+          pageContext.has_download_link ||
+          options.some(o => o.file_type?.toLowerCase().includes('pdf') || !!o.url)
+        );
+        if (isComplete) await triggerConfirmationCall(session.goal ?? description);
+        console.log(`🎯 Surfacing ${options.length} options (is_goal_complete=${isComplete})`);
+        return res.json({
+          status: 'action_complete',
+          description,
+          is_goal_complete: isComplete,
+          extracted_options: options,
+          thinking_steps: thinkingSteps,
+          suggestions: [
+            'Click one of the options above to continue',
+            'Ask me to refine the search',
+            'Ask me to navigate to a different section',
+          ],
+        });
+      }
+
+      // action_type === 'act'
+      const instruction = step.action_instruction ?? '';
+      console.log(`🤖 Acting [${stepNum + 1}]: "${instruction}"`);
+      await session.stagehand.act(instruction);
+      console.log(`✅ Action complete`);
+      session.history.push({ role: 'agent', content: `[step ${stepNum + 1}] ${instruction}` });
+      // continue to next iteration
     }
 
-    const subStep = plan.sub_step ?? userGoal;
-    console.log(`🤖 Acting on sub-step: "${subStep}"`);
-
-    // ─── STAGEHAND ACT ───
-    await session.stagehand.act(subStep);
-    console.log('✅ Action performed');
-
-    // ─── EXTRACT ───
-    console.log('🔍 Extracting what happened...');
-    const result = await session.stagehand.extract(
-      `Do not think or reason. Return ONLY valid JSON. Describe what just happened on the page after the action.`,
-      z.object({
-        description: z.string().describe('A simple, friendly description of what happened'),
-        is_goal_complete: z.boolean().describe('True if the overall user goal has been fully completed'),
-        needs_user_input: z.boolean().describe('True if the agent needs more info from the user to continue'),
-        clarification_question: z.string().optional().describe('What to ask the user if needs_user_input is true'),
-        extracted_options: z.array(z.object({
-          name: z.string(),
-          description: z.string().optional(),
-          rating: z.string().optional(),
-          price: z.string().optional(),
-        })).optional().describe('Selectable options shown on screen (restaurants, products, search results, etc.)'),
-        suggestions: z.array(z.string()).describe('2-3 suggested next actions'),
-      })
-    );
-
-    console.log('✅ Extraction done:', result);
-
-    // Append agent result to history
-    session.history.push({ role: 'agent', content: result.description });
-
-    // Trigger Twilio if goal is complete
-    if (result.is_goal_complete) {
-      await triggerConfirmationCall(session.goal ?? result.description);
-    }
-
-    // If extraction says we need user input, return clarification
-    if (result.needs_user_input && result.clarification_question) {
-      session.history.push({ role: 'agent', content: `[clarification] ${result.clarification_question}` });
-      return res.json({ status: 'needs_clarification', question: result.clarification_question });
-    }
-
+    // ─── Max steps exhausted — surface final page state ───
+    console.log(`⚠️ Max steps (${MAX_REACT_STEPS}) reached — surfacing current page state`);
+    const finalContext = await getPageContext(session.stagehand);
+    const finalOptions: ExtractedOption[] = finalContext.visible_results ?? [];
+    session.history.push({ role: 'agent', content: `Reached ${MAX_REACT_STEPS} steps. Current page: ${finalContext.page_title}` });
     return res.json({
       status: 'action_complete',
-      description: result.description,
-      is_goal_complete: result.is_goal_complete,
-      extracted_options: result.extracted_options,
-      suggestions: result.suggestions,
+      description: `I've taken ${MAX_REACT_STEPS} steps. Here's what I found on "${finalContext.page_title}".`,
+      is_goal_complete: false,
+      extracted_options: finalOptions,
+      thinking_steps: thinkingSteps,
+      suggestions: [
+        'Tell me to keep going from here',
+        'Describe what you want me to click',
+        'Ask me to search for something specific',
+      ],
     });
 
   } catch (error) {
-    console.error('❌ Error during action:', error);
+    console.error('❌ Error during ReAct loop:', error);
     res.status(500).json({ error: 'Failed to complete the action. Try again or rephrase.' });
   }
 });
