@@ -81,6 +81,12 @@ function baseDeps(overrides = {}) {
     }),
     act: async (action) => ({ ok: true, message: "Executed", action }),
     askUser: async () => null,
+    resolveUserChoice: async (answer, choices) => {
+      const t = answer.trim().toLowerCase();
+      if (/^yes\b/.test(t) && choices.length === 1) return 1;
+      if (/^no\b/.test(t)) return null;
+      return null;
+    },
     isRiskyForHITL: () => false,
     maxSteps: 6,
     actionTimeoutMs: 5000,
