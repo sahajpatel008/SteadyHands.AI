@@ -856,36 +856,60 @@ export function buildAgentGraph() {
     }
 
     const prevFingerprint = state.observationFingerprint;
-    let observed = await withTimeout(
-      deps.observe(),
-      deps.verifyTimeoutMs,
-      `Verification timed out after ${deps.verifyTimeoutMs}ms`,
-    );
+    const POST_ACTION_WAIT_MS = 5000;
+
+    if (action.type === "navigate" || action.type === "click") {
+      await new Promise((r) => setTimeout(r, POST_ACTION_WAIT_MS));
+    }
+
+    const observeWithTimeout = async () =>
+      withTimeout(
+        deps.observe(),
+        deps.verifyTimeoutMs,
+        `Verification timed out after ${deps.verifyTimeoutMs}ms`,
+      );
+
+    let observed;
+    try {
+      observed = await observeWithTimeout();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        timeline: pushTimeline(
+          exec.timeline,
+          "plan",
+          `${msg}. Replanning automatically.`,
+        ),
+        decisionCache: {},
+        contextLedger: [...(state.contextLedger ?? []), `tool_result: observe_timeout ${msg}`],
+        goal: `${state.goal}\nObserve timed out. Page may still be loading. Try again.`,
+        stallCycles: state.stallCycles + 1,
+        toolCall: null,
+        nextRoute: "checkControls",
+      };
+    }
+
     let nextFingerprint = getObservationFingerprint(observed);
     if (
       nextFingerprint === prevFingerprint &&
       (action.type === "type" || action.type === "navigate")
     ) {
       await new Promise((r) => setTimeout(r, 2000));
-      observed = await withTimeout(
-        deps.observe(),
-        deps.verifyTimeoutMs,
-        `Verification timed out after ${deps.verifyTimeoutMs}ms`,
-      );
-      nextFingerprint = getObservationFingerprint(observed);
-    }
-    // After landing on a new page (navigate/click), wait at least 5 seconds for the page to load before deciding.
-    if (
-      nextFingerprint !== prevFingerprint &&
-      (action.type === "navigate" || action.type === "click")
-    ) {
-      await new Promise((r) => setTimeout(r, 5000));
-      observed = await withTimeout(
-        deps.observe(),
-        deps.verifyTimeoutMs,
-        `Post-landing observe timed out after ${deps.verifyTimeoutMs}ms`,
-      );
-      nextFingerprint = getObservationFingerprint(observed);
+      try {
+        observed = await observeWithTimeout();
+        nextFingerprint = getObservationFingerprint(observed);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          timeline: pushTimeline(exec.timeline, "plan", `${msg}. Replanning automatically.`),
+          decisionCache: {},
+          contextLedger: [...(state.contextLedger ?? []), `tool_result: observe_timeout ${msg}`],
+          goal: `${state.goal}\nObserve timed out. Replanning.`,
+          stallCycles: state.stallCycles + 1,
+          toolCall: null,
+          nextRoute: "checkControls",
+        };
+      }
     }
     const noProgressCycles =
       nextFingerprint === prevFingerprint ? state.noProgressCycles + 1 : 0;
