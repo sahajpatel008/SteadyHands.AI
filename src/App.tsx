@@ -400,9 +400,7 @@ export default function App() {
       setSummary(null);
       summaryRequestIdRef.current += 1;
 
-      // Reset browser to Google for every new prompt; do not continue on existing page
-      browserRef.current.navigate(DEFAULT_URL);
-      await new Promise((r) => setTimeout(r, 2500));
+      // Continue from current page. Do not navigate to Google.
 
       const config = await window.steadyhands.getPublicConfig();
       const systemContext = await window.steadyhands.getSystemContext().catch(() => null);
@@ -566,7 +564,6 @@ export default function App() {
         onNavigate={(url) => browserRef.current?.navigate(url)}
         onBack={() => browserRef.current?.goBack()}
         onForward={() => browserRef.current?.goForward()}
-        onRefresh={() => browserRef.current?.refresh()}
       />
       <div className="contentSplit">
         <AssistantPanel

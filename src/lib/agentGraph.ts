@@ -311,6 +311,12 @@ export function getDecisionCacheKey(state: LoopState): string {
 }
 
 function deriveGoalQuery(goal: string): string {
+  // Prefer user clarification when present (e.g. "User clarification: 1040sr")
+  const clarificationMatch = goal.match(/user\s+clarification:\s*([^\n]+)/i);
+  if (clarificationMatch) {
+    const q = clarificationMatch[1].trim().slice(0, 140);
+    if (q) return q;
+  }
   const firstLine = goal.split("\n").map((line) => line.trim()).find(Boolean) ?? goal;
   return firstLine.replace(/^user clarification:\s*/i, "").slice(0, 140);
 }
@@ -365,9 +371,9 @@ export function pickDeterministicAction(
 
   const url = state.observation.url.toLowerCase();
   const goalLower = state.goal.toLowerCase();
-  const query = deriveGoalQuery(state.goal);
-
-    if (url.includes("google.com") && /flight|search|find|book|ticket|from|to/.test(goalLower)) {
+  const query = state.searchQuery ?? deriveGoalQuery(state.goal);
+  const hasGoodSearchQuery = query.length > 0 && query.length < 80 && !/^inferred goal:/i.test(query.trim());
+    if (url.includes("google.com") && hasGoodSearchQuery) {
     const hasTypedRecently = state.timeline
       .slice(-8)
       .some((event) => event.kind === "act" && /Typed into/i.test(event.message));
