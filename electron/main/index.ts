@@ -4,6 +4,7 @@ import https from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getConfig, getPublicConfig } from "./config";
+import { setupAgentIpcHandlers } from "./agentRunner";
 import {
   inferIntent,
   isAtCompletionPoint,
@@ -284,6 +285,10 @@ app.whenReady().then(() => {
   mcpManager = new McpClientManager(config.mcpServers);
 
   setupIpcHandlers();
+  setupAgentIpcHandlers(
+    () => mainWindow?.webContents ?? null,
+    () => mcpManager,
+  );
   logMain("init", "IPC handlers registered");
 
   // Intercept new-window requests from webview (e.g. target="_blank" links)
