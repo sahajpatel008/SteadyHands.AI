@@ -116,11 +116,15 @@ body {
 .panelHeader {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
   padding: 18px 20px 14px;
   border-bottom: 2px solid #ddd;
   flex-shrink: 0;
+}
+
+/* Push status badge (and everything after it) to the right */
+.panelHeader .statusBadge {
+  margin-left: auto;
 }
 
 .panelTitle {
@@ -218,9 +222,6 @@ body {
   padding: 16px 18px;
   background: var(--success-bg);
   border: 3px solid var(--success-border);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
 }
 
 .answerLabel {
@@ -241,37 +242,79 @@ body {
   line-height: 1.55;
 }
 
-/* ── Read Aloud (TTS) button ── */
-.speakBtn {
+/* ── TTS voice toggle (in panel header) ── */
+.ttsToggle {
   display: flex;
   align-items: center;
-  justify-content: center;
   gap: 8px;
-  width: 100%;
-  min-height: 56px;
-  padding: 0 20px;
-  background: #1b5e20;
-  color: #ffffff;
-  font-size: 1.15rem;
-  font-weight: 800;
-  border: none;
-  border-radius: 12px;
   cursor: pointer;
-  letter-spacing: 0.3px;
-  transition: background 0.15s;
+  user-select: none;
+  padding: 6px 12px 6px 10px;
+  border-radius: 999px;
+  border: 2px solid #bbb;
+  background: #f2f2f2;
+  transition: border-color 0.2s, background 0.2s;
+  flex-shrink: 0;
 }
 
-.speakBtn:hover:not(:disabled) { background: #145214; }
-
-.speakBtn--active {
-  background: #388e3c;
-  cursor: wait;
-  opacity: 0.85;
+.ttsToggle:has(.ttsToggleTrack--on) {
+  border-color: var(--accent);
+  background: #e6f4f0;
 }
 
-.speakBtn:disabled {
-  cursor: wait;
-  opacity: 0.75;
+.ttsToggleInput {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.ttsToggleIcon {
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.ttsToggleLabel {
+  font-size: 0.85rem;
+  font-weight: 800;
+  white-space: nowrap;
+  color: var(--text-muted);
+  min-width: 60px;
+}
+
+.ttsToggle:has(.ttsToggleTrack--on) .ttsToggleLabel {
+  color: var(--accent);
+}
+
+.ttsToggleTrack {
+  width: 50px;
+  height: 28px;
+  border-radius: 999px;
+  background: #bbb;
+  position: relative;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.ttsToggleTrack--on {
+  background: var(--accent);
+}
+
+.ttsToggleThumb {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  transition: left 0.2s;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.25);
+}
+
+.ttsToggleTrack--on .ttsToggleThumb {
+  left: calc(100% - 24px);
 }
 
 /* ── Page summary card ── */

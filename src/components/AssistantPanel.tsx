@@ -44,8 +44,9 @@ type Props = {
   running: boolean;
   finalAnswer: string;
   confidenceThreshold: number;
+  ttsEnabled: boolean;
+  onToggleTts: () => void;
   isSpeaking: boolean;
-  onSpeak: () => void;
 };
 
 /** Returns true when a page choice has a runnable action */
@@ -81,8 +82,9 @@ export function AssistantPanel({
   running,
   finalAnswer,
   confidenceThreshold,
+  ttsEnabled,
+  onToggleTts,
   isSpeaking,
-  onSpeak,
 }: Props) {
   const feedRef = useRef<HTMLDivElement | null>(null);
 
@@ -259,6 +261,20 @@ export function AssistantPanel({
         <span className={`statusBadge ${isBusy ? "statusBadge--busy" : "statusBadge--ready"}`}>
           {isBusy ? "Working…" : "Ready"}
         </span>
+        <label className="ttsToggle" title={ttsEnabled ? "Voice responses on — tap to turn off" : "Voice responses off — tap to turn on"}>
+          <span className="ttsToggleIcon">{isSpeaking ? "🔊" : "🔇"}</span>
+          <span className="ttsToggleLabel">{ttsEnabled ? "Voice On" : "Voice Off"}</span>
+          <span className={`ttsToggleTrack${ttsEnabled ? " ttsToggleTrack--on" : ""}`}>
+            <span className="ttsToggleThumb" />
+          </span>
+          <input
+            type="checkbox"
+            checked={ttsEnabled}
+            onChange={onToggleTts}
+            className="ttsToggleInput"
+            aria-label="Toggle voice responses"
+          />
+        </label>
       </div>
 
       {/* ── Unified message / action feed ── */}
@@ -287,16 +303,6 @@ export function AssistantPanel({
           <div className="answerCard">
             <span className="answerLabel">Answer</span>
             <p className="answerText">{finalAnswer}</p>
-            <button
-              className={`speakBtn${isSpeaking ? " speakBtn--active" : ""}`}
-              type="button"
-              onClick={onSpeak}
-              disabled={isSpeaking}
-              aria-label={isSpeaking ? "Reading answer aloud…" : "Read answer aloud"}
-              title={isSpeaking ? "Reading aloud…" : "Read answer aloud"}
-            >
-              {isSpeaking ? "🔊 Reading…" : "🔊 Read Aloud"}
-            </button>
           </div>
         ) : null}
 

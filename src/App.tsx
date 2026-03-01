@@ -79,6 +79,7 @@ export default function App() {
   const [requireApprovalForRiskyActions, setRequireApprovalForRiskyActions] = useState(false);
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.7);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [ttsEnabled, setTtsEnabled] = useState(false);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [pendingQuestionInput, setPendingQuestionInput] = useState("");
@@ -365,13 +366,13 @@ export default function App() {
     }
   }, []);
 
-  // Auto-speak the final answer when the agent is done
+  // Auto-speak the final answer when the agent is done — only if TTS toggle is on
   useEffect(() => {
-    if (finalAnswer) {
+    if (finalAnswer && ttsEnabled) {
       void speakText(finalAnswer);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [finalAnswer]);
+  }, [finalAnswer, ttsEnabled]);
 
   const buildResolvedGoal = useCallback(
     (inferredGoal: string, plan: string, rawGoal: string) =>
@@ -714,8 +715,9 @@ export default function App() {
           running={running}
           finalAnswer={finalAnswer}
           confidenceThreshold={confidenceThreshold}
+          ttsEnabled={ttsEnabled}
+          onToggleTts={() => setTtsEnabled((v) => !v)}
           isSpeaking={isSpeaking}
-          onSpeak={() => finalAnswer && void speakText(finalAnswer)}
         />
         <BrowserPane
           ref={browserRef}
