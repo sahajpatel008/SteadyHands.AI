@@ -29,6 +29,7 @@ type IntentConfirmation = {
   inferredGoal: string;
   plan: string;
   planSteps?: string[];
+  completion_point?: string;
   searchQuery?: string;
   clarifyingQuestion?: string;
   choices: Array<{ label: string; goal: string }>;
@@ -68,7 +69,7 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [finalAnswer, setFinalAnswer] = useState("");
   const mode: AgentMode = "auto";
-  const [observeTextLimit, setObserveTextLimit] = useState(5000);
+  const [observeTextLimit, setObserveTextLimit] = useState(8000);
   const [enableHighlight, setEnableHighlight] = useState(true);
   const [actionTimeoutMs, setActionTimeoutMs] = useState(7000);
   const [verifyTimeoutMs, setVerifyTimeoutMs] = useState(4000);
@@ -330,7 +331,7 @@ export default function App() {
   const startAgentWithResolvedGoal = useCallback(
     async (
       resolvedGoal: string,
-      opts?: { searchQuery?: string; planSteps?: string[] },
+      opts?: { searchQuery?: string; planSteps?: string[]; completion_point?: string },
     ) => {
       if (!browserRef.current || running) return;
       setPendingIntentConfirmation(null);
@@ -378,6 +379,17 @@ export default function App() {
           act: executeBrowserAction,
           goBack: () => browserRef.current?.goBack(),
           canGoBack: () => browserRef.current?.canGoBack?.() ?? false,
+          isPageRelevantToGoal: (obs, g, opts) =>
+            window.steadyhands.isPageRelevantToGoal({
+              observation: obs,
+              goal: g,
+              planSteps: opts?.planSteps,
+              planStepIndex: opts?.planStepIndex,
+            }),
+          isGoalAchieved: (obs, g) =>
+            window.steadyhands.isGoalAchieved({ observation: obs, goal: g }),
+          isAtCompletionPoint: (obs, cp) =>
+            window.steadyhands.isAtCompletionPoint({ observation: obs, completionPoint: cp }),
           maxSteps: 0,
           actionTimeoutMs,
           verifyTimeoutMs,
@@ -391,6 +403,7 @@ export default function App() {
           mode,
           initialObservation,
           resolvedGoal,
+          completion_point: opts?.completion_point,
           searchQuery: opts?.searchQuery,
           planSteps: opts?.planSteps,
           signal: abortControllerRef.current.signal,
@@ -444,6 +457,7 @@ export default function App() {
         inferredGoal: string;
         plan: string;
         planSteps?: string[];
+        completion_point?: string;
         searchQuery?: string;
         clarifyingQuestion?: string;
         choices: Array<{ label: string; goal: string }>;
@@ -461,6 +475,7 @@ export default function App() {
         inferredGoal: result.inferredGoal,
         plan: result.plan,
         planSteps: result.planSteps,
+        completion_point: result.completion_point,
         searchQuery: result.searchQuery,
         clarifyingQuestion: result.clarifyingQuestion,
         choices: result.choices ?? [],
@@ -485,6 +500,7 @@ export default function App() {
     void startAgentWithResolvedGoal(resolved, {
       searchQuery: pendingIntentConfirmation.searchQuery,
       planSteps: pendingIntentConfirmation.planSteps,
+      completion_point: pendingIntentConfirmation.completion_point,
     });
   }, [pendingIntentConfirmation, buildResolvedGoal, pushChat, startAgentWithResolvedGoal]);
 
@@ -509,6 +525,7 @@ export default function App() {
       void startAgentWithResolvedGoal(resolved, {
         searchQuery: pendingIntentConfirmation.searchQuery,
         planSteps: pendingIntentConfirmation.planSteps,
+        completion_point: pendingIntentConfirmation.completion_point,
       });
     },
     [pendingIntentConfirmation, buildResolvedGoal, pushChat, startAgentWithResolvedGoal],
@@ -543,6 +560,7 @@ export default function App() {
         inferredGoal: result.inferredGoal,
         plan: result.plan,
         planSteps: result.planSteps,
+        completion_point: result.completion_point,
         searchQuery: result.searchQuery,
         clarifyingQuestion: result.clarifyingQuestion,
         choices: result.choices ?? [],

@@ -120,6 +120,9 @@ export type PlanActionInput = {
   availableActions: SidebarChoice[];
   availableMcpTools?: McpToolDescriptor[];
   currentStep?: string;
+  /** Queued plan steps from inferIntent. Planner should pick actions that achieve the current step. */
+  planSteps?: string[];
+  planStepIndex?: number;
 };
 
 export type ActionExecutionResult = {
@@ -148,6 +151,8 @@ export type AgentRunInput = {
   initialObservation: PageObservation;
   /** When set, skips inferIntent and uses this as the resolved goal. */
   resolvedGoal?: string;
+  /** Final state to achieve when goal is done. From inferIntent; when using resolvedGoal, pass explicitly. */
+  completion_point?: string;
   /** Short search query for web search (e.g. "Form 1040-SR"). Used for type actions on Google. */
   searchQuery?: string;
   /** Queued plan steps from inferIntent. Each step is a single actionable task. */

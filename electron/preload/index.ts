@@ -29,6 +29,18 @@ const api = {
   planAction: (payload: PlanActionInput) => ipcRenderer.invoke("llm:planAction", payload),
   listMcpTools: () => ipcRenderer.invoke("mcp:listTools"),
   callMcpTool: (payload: McpToolCall) => ipcRenderer.invoke("mcp:callTool", payload),
+  isPageRelevantToGoal: (payload: {
+    observation: PageObservation;
+    goal: string;
+    planSteps?: string[];
+    planStepIndex?: number;
+  }) => ipcRenderer.invoke("llm:isPageRelevantToGoal", payload),
+  isGoalAchieved: (payload: { observation: PageObservation; goal: string }) =>
+    ipcRenderer.invoke("llm:isGoalAchieved", payload),
+  isAtCompletionPoint: (payload: {
+    observation: PageObservation;
+    completionPoint: string;
+  }) => ipcRenderer.invoke("llm:isAtCompletionPoint", payload),
 };
 
 contextBridge.exposeInMainWorld("steadyhands", api);

@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 import { getConfig, getPublicConfig } from "./config";
 import {
   inferIntent,
+  isAtCompletionPoint,
+  isGoalAchieved,
+  isPageRelevantToGoal,
   planAction,
   summarizePage,
   safetySupervisor,
@@ -169,6 +172,34 @@ function setupIpcHandlers() {
     return result;
   });
 
+  ipcMain.handle(
+    "llm:isPageRelevantToGoal",
+    async (
+      _,
+      payload: {
+        observation: PageObservation;
+        goal: string;
+        planSteps?: string[];
+        planStepIndex?: number;
+      },
+    ) => {
+      return isPageRelevantToGoal(payload.observation, payload.goal, {
+        planSteps: payload.planSteps,
+        planStepIndex: payload.planStepIndex,
+      });
+    },
+  );
+
+  ipcMain.handle("llm:isGoalAchieved", async (_, payload: { observation: PageObservation; goal: string }) => {
+    return isGoalAchieved(payload.observation, payload.goal);
+  });
+
+  ipcMain.handle(
+    "llm:isAtCompletionPoint",
+    async (_, payload: { observation: PageObservation; completionPoint: string }) => {
+      return isAtCompletionPoint(payload.observation, payload.completionPoint);
+    },
+  );
 }
 
 app.whenReady().then(() => {

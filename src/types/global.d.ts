@@ -59,6 +59,17 @@ declare global {
         availableMcpTools?: McpToolDescriptor[];
         currentStep?: string;
       }) => Promise<unknown>;
+      isPageRelevantToGoal: (payload: {
+        observation: PageObservation;
+        goal: string;
+        planSteps?: string[];
+        planStepIndex?: number;
+      }) => Promise<boolean>;
+      isGoalAchieved: (payload: { observation: PageObservation; goal: string }) => Promise<boolean>;
+      isAtCompletionPoint: (payload: {
+        observation: PageObservation;
+        completionPoint: string;
+      }) => Promise<boolean>;
     };
   }
 

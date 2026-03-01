@@ -12,7 +12,7 @@ test("getExtractionScript injects the requested text limit", () => {
   assert.match(script, /title: document\.title \|\| "Untitled"/);
   assert.match(script, /data-sh-id/);
 });                                                                     
-                                              
+
 test("getExtractionScript includes all expected interactive selectors", () => {
   const script = getExtractionScript(1000);
 
@@ -29,4 +29,13 @@ test("getExtractionScript includes all expected interactive selectors", () => {
 test("getExtractionScript preserves zero limit behavior", () => {
   const script = getExtractionScript(0);
   assert.match(script, /slice\(0, 0\)/);
+});
+
+test("getExtractionScript includes Google homepage whitelist (search input + Google Search button only)", () => {
+  const script = getExtractionScript(1000);
+  assert.match(script, /isGoogleHome/);
+  assert.match(script, /name === "q"/);
+  assert.match(script, /name === "btnK"/);
+  assert.match(script, /isSearchInput/);
+  assert.match(script, /isGoogleSearchBtn/);
 });
