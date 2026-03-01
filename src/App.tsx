@@ -74,22 +74,12 @@ export default function App() {
     const ts = new Date().toISOString();
     setTimeline((prev) => [...prev, { ts, kind, message }]);
 
-    // Mirror meaningful steps into the chat feed so the user can follow along
-    const prefix: Record<AgentTimelineEvent["kind"], string | null> = {
-      observe: "👀 Looking at page",
-      plan:    "🧠 Thinking",
-      act:     "🖱️ Doing",
-      verify:  "✅ Checking",
-      question:"❓ Question",
-      user:    null, // already shown as a user bubble
-      summary: null, // shown separately as page summary
-      error:   "⚠️ Error",
-    };
-    const label = prefix[kind];
-    if (label !== null) {
+    // Only surface hard errors into the main chat feed; all other steps live
+    // exclusively inside the "Show thinking" collapsible.
+    if (kind === "error") {
       setChatMessages((prev) => [
         ...prev,
-        { ts, role: "system" as const, text: `${label}: ${message}` },
+        { ts, role: "system" as const, text: `⚠️ Error: ${message}` },
       ]);
     }
   }, []);
@@ -476,6 +466,7 @@ export default function App() {
     setIntentInferring(true);
     const userMessage = goal;
     setGoal("");
+    pushChat("user", userMessage);
     try {
       const result = (await window.steadyhands.inferIntent(userMessage)) as {
         prompt_type?: "conversational" | "task";
@@ -557,6 +548,51 @@ export default function App() {
     askUserResolveRef.current?.(null);
   }, [pushChat]);
 
+  const clearSession = useCallback(() => {
+    // 1. Abort any in-flight agent run
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+
+    // 2. Resolve any pending user-question promise so the agent loop exits cleanly
+    if (askUserResolveRef.current) {
+      askUserResolveRef.current(null);
+      askUserResolveRef.current = null;
+    }
+
+    // 3. Stop any TTS audio
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
+    setIsSpeaking(false);
+
+    // 4. Cancel any pending summarize debounce
+    if (summarizeDebounceRef.current) {
+      clearTimeout(summarizeDebounceRef.current);
+      summarizeDebounceRef.current = null;
+    }
+
+    // 5. Reset all session state
+    setChatMessages([]);
+    setTimeline([]);
+    setSummary(null);
+    setFinalAnswer("");
+    setGoal("");
+    setRunning(false);
+    setIntentInferring(false);
+    setPendingQuestion(null);
+    setPendingQuestionInput("");
+    setPendingIntentConfirmation(null);
+    setPendingIntentRefine(false);
+    summaryRequestIdRef.current += 1;
+
+    // 6. Navigate browser back to the home page
+    browserRef.current?.navigate(DEFAULT_URL);
+    setCurrentUrl(DEFAULT_URL);
+
+    logRenderer("App", "clearSession: session cleared");
+  }, []);
+
   return (
     <div className="appRoot">
       <NavigationBar
@@ -564,6 +600,7 @@ export default function App() {
         onNavigate={(url) => browserRef.current?.navigate(url)}
         onBack={() => browserRef.current?.goBack()}
         onForward={() => browserRef.current?.goForward()}
+        onClearSession={clearSession}
       />
       <div className="contentSplit">
         <AssistantPanel
