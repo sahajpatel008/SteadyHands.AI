@@ -64,6 +64,7 @@ export function AssistantPanel({
 }: Props) {
   const feedRef = useRef<HTMLDivElement | null>(null);
   const thinkingStepsRef = useRef<HTMLDivElement | null>(null);
+  const autoSubmitRef = useRef(false);
 
   const [thinkingOpen, setThinkingOpen] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -146,8 +147,7 @@ export function AssistantPanel({
               console.log("STT full response:", data);
               const text = data.text;
               if (text) {
-                console.log("STT Result:", text);
-                if (pendingQuestion) {
+                console.log("STT Result:", text);                autoSubmitRef.current = true;                if (pendingQuestion) {
                   const currentText = pendingQuestionInputRef.current ? pendingQuestionInputRef.current + " " : "";
                   onPendingQuestionInputChange(currentText + text);
                 } else {
@@ -192,6 +192,22 @@ export function AssistantPanel({
       thinkingStepsRef.current.scrollTop = thinkingStepsRef.current.scrollHeight;
     }
   }, [timeline, thinkingOpen]);
+
+  // Auto-submit after STT fills the goal field
+  useEffect(() => {
+    if (autoSubmitRef.current && !pendingQuestion && goal.trim() && !running && !intentInferring) {
+      autoSubmitRef.current = false;
+      onRun();
+    }
+  }, [goal]);
+
+  // Auto-submit after STT fills the pending-question field
+  useEffect(() => {
+    if (autoSubmitRef.current && pendingQuestion && pendingQuestionInput.trim()) {
+      autoSubmitRef.current = false;
+      onSubmitPendingQuestion();
+    }
+  }, [pendingQuestionInput]);
 
   // Determine what textarea and primary action to show
   const isBusy = running || intentInferring || isTranscribing;

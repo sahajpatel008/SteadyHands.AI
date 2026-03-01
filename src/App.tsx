@@ -468,6 +468,7 @@ export default function App() {
     setIntentInferring(true);
     const userMessage = goal;
     setGoal("");
+    pushChat("user", userMessage);
     try {
       const result = (await window.steadyhands.inferIntent(userMessage)) as {
         prompt_type?: "conversational" | "task";
