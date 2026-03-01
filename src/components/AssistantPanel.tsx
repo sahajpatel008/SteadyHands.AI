@@ -237,7 +237,7 @@ export function AssistantPanel({
       <div className="panelHeader">
         <h1 className="panelTitle">SteadyHands</h1>
         <label className="ttsToggle" title={ttsEnabled ? "Voice responses on — tap to turn off" : "Voice responses off — tap to turn on"}>
-          <span className="ttsToggleIcon">{isSpeaking ? "🔊" : "🔇"}</span>
+          <span className="ttsToggleIcon">{ttsEnabled ? "🔊" : "🔇"}</span>
           <span className="ttsToggleLabel">{ttsEnabled ? "Voice On" : "Voice Off"}</span>
           <span className={`ttsToggleTrack${ttsEnabled ? " ttsToggleTrack--on" : ""}`}>
             <span className="ttsToggleThumb" />
