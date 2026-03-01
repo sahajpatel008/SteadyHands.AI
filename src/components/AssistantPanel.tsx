@@ -44,6 +44,8 @@ type Props = {
   running: boolean;
   finalAnswer: string;
   confidenceThreshold: number;
+  isSpeaking: boolean;
+  onSpeak: () => void;
 };
 
 /** Returns true when a page choice has a runnable action */
@@ -79,6 +81,8 @@ export function AssistantPanel({
   running,
   finalAnswer,
   confidenceThreshold,
+  isSpeaking,
+  onSpeak,
 }: Props) {
   const feedRef = useRef<HTMLDivElement | null>(null);
 
@@ -283,6 +287,16 @@ export function AssistantPanel({
           <div className="answerCard">
             <span className="answerLabel">Answer</span>
             <p className="answerText">{finalAnswer}</p>
+            <button
+              className={`speakBtn${isSpeaking ? " speakBtn--active" : ""}`}
+              type="button"
+              onClick={onSpeak}
+              disabled={isSpeaking}
+              aria-label={isSpeaking ? "Reading answer aloud…" : "Read answer aloud"}
+              title={isSpeaking ? "Reading aloud…" : "Read answer aloud"}
+            >
+              {isSpeaking ? "🔊 Reading…" : "🔊 Read Aloud"}
+            </button>
           </div>
         ) : null}
 

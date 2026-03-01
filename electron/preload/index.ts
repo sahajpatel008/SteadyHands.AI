@@ -41,6 +41,7 @@ const api = {
     observation: PageObservation;
     completionPoint: string;
   }) => ipcRenderer.invoke("llm:isAtCompletionPoint", payload),
+  speak: (text: string): Promise<string> => ipcRenderer.invoke("tts:speak", text),
 };
 
 contextBridge.exposeInMainWorld("steadyhands", api);

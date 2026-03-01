@@ -218,6 +218,9 @@ body {
   padding: 16px 18px;
   background: var(--success-bg);
   border: 3px solid var(--success-border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .answerLabel {
@@ -236,6 +239,39 @@ body {
   font-weight: 600;
   color: var(--text);
   line-height: 1.55;
+}
+
+/* ── Read Aloud (TTS) button ── */
+.speakBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 56px;
+  padding: 0 20px;
+  background: #1b5e20;
+  color: #ffffff;
+  font-size: 1.15rem;
+  font-weight: 800;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  letter-spacing: 0.3px;
+  transition: background 0.15s;
+}
+
+.speakBtn:hover:not(:disabled) { background: #145214; }
+
+.speakBtn--active {
+  background: #388e3c;
+  cursor: wait;
+  opacity: 0.85;
+}
+
+.speakBtn:disabled {
+  cursor: wait;
+  opacity: 0.75;
 }
 
 /* ── Page summary card ── */
