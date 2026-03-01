@@ -452,6 +452,7 @@ export default function App() {
     }
 
     setIntentInferring(true);
+    setGoal("");
     try {
       const result = (await window.steadyhands.inferIntent(goal)) as {
         inferredGoal: string;
@@ -591,7 +592,11 @@ export default function App() {
     }
     summarizeDebounceRef.current = setTimeout(() => {
       summarizeDebounceRef.current = null;
-      void summarizeCurrentPage(goal);
+      if (goal.trim()) {
+        void summarizeCurrentPage(goal);
+      } else {
+        setSummary(null);
+      }
     }, 250);
   };
 
@@ -600,6 +605,7 @@ export default function App() {
     if (answer) {
       pushChat("user", answer);
     }
+    setPendingQuestionInput("");
     askUserResolveRef.current?.(answer);
   }, [pendingQuestionInput, pushChat]);
 

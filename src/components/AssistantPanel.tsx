@@ -287,7 +287,7 @@ export function AssistantPanel({
         ) : null}
 
         {/* Page summary */}
-        {summary?.summary ? (
+        {summary?.summary && !finalAnswer ? (
           <div className="pageSummaryCard">
             <p className="pageSummaryText">{summary.summary}</p>
             {summary.purpose ? <p className="pagePurpose">{summary.purpose}</p> : null}
@@ -295,7 +295,7 @@ export function AssistantPanel({
         ) : null}
 
         {/* Page action choices */}
-        {summary?.choices?.length ? (
+        {summary?.choices?.length && !finalAnswer ? (
           <div className="choiceGroup">
             {summary.choices.map((choice, idx) => (
               <button
