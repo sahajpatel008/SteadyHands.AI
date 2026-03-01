@@ -167,12 +167,31 @@ body {
 /* ── Unified message / action feed ── */
 .messageFeed {
   flex: 1;
-  overflow-y: auto;
+  overflow-y: scroll;
   padding: 16px 18px;
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-height: 0;
+}
+
+.messageFeed::-webkit-scrollbar {
+  width: 8px;
+}
+
+.messageFeed::-webkit-scrollbar-track {
+  background: #f0f0f0;
+  border-radius: 999px;
+}
+
+.messageFeed::-webkit-scrollbar-thumb {
+  background: #b0b0b0;
+  border-radius: 999px;
+  border: 2px solid #f0f0f0;
+}
+
+.messageFeed::-webkit-scrollbar-thumb:hover {
+  background: #888;
 }
 
 .feedHint {
@@ -518,6 +537,7 @@ body {
   background: var(--bubble-agent-bg);
   overflow: hidden;
   animation: bubbleIn 0.22s ease-out both;
+  flex-shrink: 0;
 }
 
 .thinkingHeader {
@@ -603,9 +623,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 7px;
-  max-height: 280px;
-  overflow-y: auto;
+  overflow-y: visible;
 }
+
+.thinkingSteps::-webkit-scrollbar { display: none; }
 
 .thinkingStep {
   display: flex;
