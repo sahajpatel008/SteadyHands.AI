@@ -78,6 +78,9 @@ export default function App() {
   const [enableSafetyGuardrails, setEnableSafetyGuardrails] = useState(false);
   const [requireApprovalForRiskyActions, setRequireApprovalForRiskyActions] = useState(false);
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.7);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [ttsEnabled, setTtsEnabled] = useState(false);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [pendingQuestionInput, setPendingQuestionInput] = useState("");
   const [pendingIntentConfirmation, setPendingIntentConfirmation] =
@@ -327,6 +330,49 @@ export default function App() {
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const [intentInferring, setIntentInferring] = useState(false);
+
+  const speakText = useCallback(async (text: string) => {
+    // Stop any currently playing audio
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
+    setIsSpeaking(true);
+    try {
+      const base64Audio = await window.steadyhands.speak(text);
+      const binaryStr = atob(base64Audio);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: "audio/mpeg" });
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      currentAudioRef.current = audio;
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        currentAudioRef.current = null;
+        setIsSpeaking(false);
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        currentAudioRef.current = null;
+        setIsSpeaking(false);
+      };
+      await audio.play();
+    } catch (e) {
+      logRenderer("App", "TTS error", { error: String(e) });
+      setIsSpeaking(false);
+    }
+  }, []);
+
+  // Auto-speak the final answer when the agent is done — only if TTS toggle is on
+  useEffect(() => {
+    if (finalAnswer && ttsEnabled) {
+      void speakText(finalAnswer);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finalAnswer, ttsEnabled]);
 
   const buildResolvedGoal = useCallback(
     (inferredGoal: string, plan: string, rawGoal: string) =>
@@ -669,6 +715,9 @@ export default function App() {
           running={running}
           finalAnswer={finalAnswer}
           confidenceThreshold={confidenceThreshold}
+          ttsEnabled={ttsEnabled}
+          onToggleTts={() => setTtsEnabled((v) => !v)}
+          isSpeaking={isSpeaking}
         />
         <BrowserPane
           ref={browserRef}

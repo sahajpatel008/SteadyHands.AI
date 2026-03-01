@@ -29,6 +29,7 @@ const envSchema = z.object({
   STEADYHANDS_FAST_PLANNER_MODEL: z.string().min(1).optional(),
   STEADYHANDS_TURBO_MODE: z.enum(["true", "false"]).optional().default("true"),
   STEADYHANDS_MCP_SERVERS: z.string().optional(),
+  ELEVEN_LABS_API_KEY: z.string().optional(),
 });
 
 const mcpServerConfigSchema = z.object({
@@ -83,6 +84,7 @@ export type AppConfig = {
   fastPlannerModel?: string;
   turboMode: boolean;
   mcpServers: Record<string, McpServerConfig>;
+  elevenLabsApiKey?: string;
 };
 
 let cachedConfig: AppConfig | null = null;
@@ -163,6 +165,7 @@ export function getConfig(): AppConfig {
       : undefined,
     turboMode: env.STEADYHANDS_TURBO_MODE === "true",
     mcpServers: parseMcpServers(env.STEADYHANDS_MCP_SERVERS),
+    elevenLabsApiKey: env.ELEVEN_LABS_API_KEY,
   };
 
   return cachedConfig;

@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, session } from "electron";
 import fs from "node:fs";
+import https from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getConfig, getPublicConfig } from "./config";
@@ -193,6 +194,47 @@ function setupIpcHandlers() {
 
   ipcMain.handle("llm:isGoalAchieved", async (_, payload: { observation: PageObservation; goal: string }) => {
     return isGoalAchieved(payload.observation, payload.goal);
+  });
+
+  ipcMain.handle("tts:speak", async (_, text: string): Promise<string> => {
+    const config = getConfig();
+    if (!config.elevenLabsApiKey) {
+      throw new Error("ElevenLabs API key (ELEVEN_LABS_API_KEY) is not configured in .env");
+    }
+    const VOICE_ID = "JBFqnCBsd6RMkjVDRZzb";
+    const body = JSON.stringify({
+      text,
+      model_id: "eleven_multilingual_v2",
+      voice_settings: { stability: 0.4, similarity_boost: 0.8 },
+    });
+    return new Promise<string>((resolve, reject) => {
+      const options = {
+        hostname: "api.elevenlabs.io",
+        path: `/v1/text-to-speech/${VOICE_ID}`,
+        method: "POST",
+        headers: {
+          Accept: "audio/mpeg",
+          "xi-api-key": config.elevenLabsApiKey!,
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        },
+      };
+      const req = https.request(options, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const buffer = Buffer.concat(chunks);
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(new Error(`ElevenLabs error ${res.statusCode}: ${buffer.toString()}`));
+          } else {
+            resolve(buffer.toString("base64"));
+          }
+        });
+      });
+      req.on("error", reject);
+      req.write(body);
+      req.end();
+    });
   });
 
   ipcMain.handle(

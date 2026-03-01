@@ -70,6 +70,7 @@ declare global {
         observation: PageObservation;
         completionPoint: string;
       }) => Promise<boolean>;
+      speak: (text: string) => Promise<string>;
     };
   }
 
