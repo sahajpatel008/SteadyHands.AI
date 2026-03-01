@@ -1,8 +1,8 @@
+/// <reference path="./types/global.d.ts" />
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AssistantPanel } from "./components/AssistantPanel";
 import { BrowserPane, type BrowserPaneHandle } from "./components/BrowserPane";
 import { NavigationBar } from "./components/NavigationBar";
-import { runAgentGraph } from "./lib/agentGraph";
 import { choiceToAction } from "./lib/choiceAction";
 import { logRenderer } from "../shared/logger";
 import type {
@@ -25,24 +25,7 @@ type ChatMessage = {
   text: string;
 };
 
-type IntentConfirmation = {
-  inferredGoal: string;
-  plan: string;
-  planSteps?: string[];
-  completion_point?: string;
-  searchQuery?: string;
-  clarifyingQuestion?: string;
-  choices: Array<{ label: string; goal: string }>;
-  rawGoal: string;
-};
-
-function isRiskyAction(action: BrowserAction): boolean {
-  const s = JSON.stringify(action).toLowerCase();
-  return (
-    /\$|pay|payment|confirm|transfer|withdraw|submit.*order|purchase|buy now/i.test(s) ||
-    (action.type === "navigate" && /checkout|payment|pay\./i.test(action.url))
-  );
-}
+import { isRiskyAction } from "../shared/isRiskyAction";
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -83,9 +66,6 @@ export default function App() {
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [pendingQuestionInput, setPendingQuestionInput] = useState("");
-  const [pendingIntentConfirmation, setPendingIntentConfirmation] =
-    useState<IntentConfirmation | null>(null);
-  const [pendingIntentRefine, setPendingIntentRefine] = useState(false);
   const askUserResolveRef = useRef<((answer: string | null) => void) | null>(null);
   const summaryRequestIdRef = useRef(0);
   const summarizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -328,7 +308,7 @@ export default function App() {
     ],
   );
 
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const runIdRef = useRef<string | null>(null);
   const [intentInferring, setIntentInferring] = useState(false);
 
   const speakText = useCallback(async (text: string) => {
@@ -375,101 +355,87 @@ export default function App() {
   }, [finalAnswer, ttsEnabled]);
 
   const buildResolvedGoal = useCallback(
-    (inferredGoal: string, plan: string, rawGoal: string) =>
-      [
+    (
+      inferredGoal: string,
+      plan: string,
+      rawGoal: string,
+      clarifyingQuestion?: string,
+      requireUserInput?: boolean,
+    ) => {
+      const parts = [
         `Inferred goal: ${inferredGoal}`,
         ``,
         `Plan:`,
         plan,
         ``,
         `Original user message: ${rawGoal}`,
-      ].join("\n"),
+      ];
+      if (requireUserInput || clarifyingQuestion?.trim()) {
+        parts.push(
+          ``,
+          `USER INPUT REQUIRED: The LLM determined we must ask the user for more info before selecting among options. ${clarifyingQuestion?.trim() ? `Suggested question: ${clarifyingQuestion}` : "Ask before auto-selecting."}`,
+        );
+      }
+      return parts.join("\n");
+    },
     [],
   );
 
   const startAgentWithResolvedGoal = useCallback(
     async (
       resolvedGoal: string,
-      opts?: { searchQuery?: string; planSteps?: string[]; completion_point?: string },
+      opts?: {
+        searchQuery?: string;
+        planSteps?: string[];
+        completion_point?: string;
+        clarifyingQuestion?: string;
+      },
     ) => {
       if (!browserRef.current || running) return;
-      setPendingIntentConfirmation(null);
-      setPendingIntentRefine(false);
-      abortControllerRef.current = new AbortController();
+      const runId = crypto.randomUUID();
+      runIdRef.current = runId;
       setRunning(true);
       setFinalAnswer("");
+      setTimeline([]);
+      setSummary(null);
       summaryRequestIdRef.current += 1;
+
+      // Reset browser to Google for every new prompt; do not continue on existing page
+      browserRef.current.navigate(DEFAULT_URL);
+      await new Promise((r) => setTimeout(r, 2500));
+
+      const config = await window.steadyhands.getPublicConfig();
+      const systemContext = await window.steadyhands.getSystemContext().catch(() => null);
+      const maxSteps = config.maxSteps ?? 0;
+
+      window.steadyhands.registerAgentHandlers({
+        observe: () => browserRef.current!.observe(),
+        act: executeBrowserAction,
+        goBack: () => browserRef.current?.goBack(),
+        canGoBack: () => browserRef.current?.canGoBack?.() ?? false,
+        askUser: askUserViaChat,
+        onEvent: (kind, message) =>
+          pushTimeline(kind as AgentTimelineEvent["kind"], message),
+      });
+
       try {
-        const [initialObservation, systemContext] = await Promise.all([
-          browserRef.current.observe(),
-          window.steadyhands.getSystemContext().catch(() => null),
-        ]);
-        const output = await runAgentGraph(
-        {
-          inferIntent: (rawGoal) =>
-            window.steadyhands.inferIntent(rawGoal) as Promise<{
-              inferredGoal: string;
-              plan: string;
-            }>,
-          semanticInterpreter: async (obs, userGoal, opts) =>
-            window.steadyhands.semanticInterpreter(obs, userGoal, opts) as Promise<
-              PageSummary & { current_step?: string }
-            >,
-          safetySupervisor: async (userGoal, action, context) =>
-            window.steadyhands.safetySupervisor({ userGoal, action, context }) as Promise<SafetyValidationResult>,
-          isRiskyForHITL: isRiskyAction,
-          observe: async () => browserRef.current!.observe(),
-          plan: async (input) => {
-            const result = (await window.steadyhands.planAction(input)) as PlanActionResult;
-            logRenderer("App", "plan() done", {
-              done: result.done,
-              selectedChoiceIndex: !result.done ? result.selectedChoiceIndex : undefined,
-              mcpToolCall:
-                !result.done && result.mcpToolCall
-                  ? `${result.mcpToolCall.server}/${result.mcpToolCall.name}`
-                  : undefined,
-              hasAction: !result.done && !!result.action,
-            });
-            return result;
-          },
-          listMcpTools: async () => window.steadyhands.listMcpTools(),
-          callMcpTool: async (call) => window.steadyhands.callMcpTool(call),
-          askUser: askUserViaChat,
-          act: executeBrowserAction,
-          goBack: () => browserRef.current?.goBack(),
-          canGoBack: () => browserRef.current?.canGoBack?.() ?? false,
-          isPageRelevantToGoal: (obs, g, opts) =>
-            window.steadyhands.isPageRelevantToGoal({
-              observation: obs,
-              goal: g,
-              planSteps: opts?.planSteps,
-              planStepIndex: opts?.planStepIndex,
-            }),
-          isGoalAchieved: (obs, g) =>
-            window.steadyhands.isGoalAchieved({ observation: obs, goal: g }),
-          isAtCompletionPoint: (obs, cp) =>
-            window.steadyhands.isAtCompletionPoint({ observation: obs, completionPoint: cp }),
-          maxSteps: 0,
+        const output = await window.steadyhands.runAgent({
+          runId,
+          goal,
+          mode,
+          resolvedGoal,
+          completion_point: opts?.completion_point,
+          searchQuery: opts?.searchQuery,
+          planSteps: opts?.planSteps,
+          systemContext: systemContext ?? undefined,
+          maxSteps,
           actionTimeoutMs,
           verifyTimeoutMs,
           maxRetriesPerStep,
           fastMode,
           enableSafetyGuardrails,
           requireApprovalForRiskyActions,
-          onEvent: pushTimeline,
-        },
-        {
-          goal,
-          mode,
-          initialObservation,
-          resolvedGoal,
-          completion_point: opts?.completion_point,
-          searchQuery: opts?.searchQuery,
-          planSteps: opts?.planSteps,
-          signal: abortControllerRef.current.signal,
-          systemContext: systemContext ?? undefined,
-        },
-      );
+        });
 
         logRenderer("App", "onRunAgent done", {
           completed: output.completed,
@@ -482,6 +448,8 @@ export default function App() {
         logRenderer("App", "Agent run failed", { error: String(error) });
         pushTimeline("error", error instanceof Error ? error.message : "Unknown error");
       } finally {
+        window.steadyhands.registerAgentHandlers(null);
+        runIdRef.current = null;
         summaryRequestIdRef.current += 1;
         setRunning(false);
       }
@@ -507,40 +475,42 @@ export default function App() {
     if (!goal.trim()) return;
     logRenderer("App", "onRunAgent start", { goal: goal.slice(0, 60), mode });
 
-    if (pendingIntentConfirmation) {
-      return;
-    }
-
     setIntentInferring(true);
+    const userMessage = goal;
     setGoal("");
     try {
-      const result = (await window.steadyhands.inferIntent(goal)) as {
+      const result = (await window.steadyhands.inferIntent(userMessage)) as {
+        prompt_type?: "conversational" | "task";
         inferredGoal: string;
         plan: string;
         planSteps?: string[];
         completion_point?: string;
         searchQuery?: string;
         clarifyingQuestion?: string;
+        requireUserInput?: boolean;
         choices: Array<{ label: string; goal: string }>;
       };
-      const msg = [
-        `I inferred: ${result.inferredGoal}`,
-        ``,
-        `Plan: ${result.plan}`,
-        result.clarifyingQuestion ? `\n${result.clarifyingQuestion}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n");
-      pushChat("agent", msg);
-      setPendingIntentConfirmation({
-        inferredGoal: result.inferredGoal,
-        plan: result.plan,
+
+      if (result.prompt_type === "conversational") {
+        const reply = await window.steadyhands.respondConversationally(userMessage);
+        pushChat("agent", reply);
+        setIntentInferring(false);
+        return;
+      }
+
+      const resolved = buildResolvedGoal(
+        result.inferredGoal,
+        result.plan,
+        userMessage,
+        result.clarifyingQuestion,
+        result.requireUserInput,
+      );
+      pushChat("agent", `I inferred: ${result.inferredGoal}\n\nPlan: ${result.plan}`);
+      void startAgentWithResolvedGoal(resolved, {
+        searchQuery: result.searchQuery,
         planSteps: result.planSteps,
         completion_point: result.completion_point,
-        searchQuery: result.searchQuery,
         clarifyingQuestion: result.clarifyingQuestion,
-        choices: result.choices ?? [],
-        rawGoal: goal,
       });
     } catch (error) {
       logRenderer("App", "inferIntent failed", { error: String(error) });
@@ -549,91 +519,6 @@ export default function App() {
       setIntentInferring(false);
     }
   };
-
-  const onProceedIntent = useCallback(() => {
-    if (!pendingIntentConfirmation) return;
-    const resolved = buildResolvedGoal(
-      pendingIntentConfirmation.inferredGoal,
-      pendingIntentConfirmation.plan,
-      pendingIntentConfirmation.rawGoal,
-    );
-    pushChat("user", "Proceed with this plan");
-    void startAgentWithResolvedGoal(resolved, {
-      searchQuery: pendingIntentConfirmation.searchQuery,
-      planSteps: pendingIntentConfirmation.planSteps,
-      completion_point: pendingIntentConfirmation.completion_point,
-    });
-  }, [pendingIntentConfirmation, buildResolvedGoal, pushChat, startAgentWithResolvedGoal]);
-
-  const onRefineIntent = useCallback(() => {
-    setPendingIntentRefine(true);
-  }, []);
-
-  const onDismissIntentConfirmation = useCallback(() => {
-    setPendingIntentConfirmation(null);
-    setPendingIntentRefine(false);
-  }, []);
-
-  const onPickIntentChoice = useCallback(
-    (choice: { label: string; goal: string }) => {
-      if (!pendingIntentConfirmation) return;
-      pushChat("user", choice.label);
-      const resolved = buildResolvedGoal(
-        choice.goal,
-        pendingIntentConfirmation.plan,
-        pendingIntentConfirmation.rawGoal,
-      );
-      void startAgentWithResolvedGoal(resolved, {
-        searchQuery: pendingIntentConfirmation.searchQuery,
-        planSteps: pendingIntentConfirmation.planSteps,
-        completion_point: pendingIntentConfirmation.completion_point,
-      });
-    },
-    [pendingIntentConfirmation, buildResolvedGoal, pushChat, startAgentWithResolvedGoal],
-  );
-
-  const onSubmitRefine = useCallback(async () => {
-    const refinement = pendingQuestionInput.trim();
-    if (!refinement || !pendingIntentConfirmation) return;
-    setPendingIntentRefine(false);
-    setPendingQuestionInput("");
-    pushChat("user", refinement);
-    setIntentInferring(true);
-    try {
-      const result = (await window.steadyhands.inferIntent(refinement)) as {
-        inferredGoal: string;
-        plan: string;
-        planSteps?: string[];
-        searchQuery?: string;
-        clarifyingQuestion?: string;
-        choices: Array<{ label: string; goal: string }>;
-      };
-      const msg = [
-        `I inferred: ${result.inferredGoal}`,
-        ``,
-        `Plan: ${result.plan}`,
-        result.clarifyingQuestion ? `\n${result.clarifyingQuestion}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n");
-      pushChat("agent", msg);
-      setPendingIntentConfirmation({
-        inferredGoal: result.inferredGoal,
-        plan: result.plan,
-        planSteps: result.planSteps,
-        completion_point: result.completion_point,
-        searchQuery: result.searchQuery,
-        clarifyingQuestion: result.clarifyingQuestion,
-        choices: result.choices ?? [],
-        rawGoal: refinement,
-      });
-    } catch (error) {
-      logRenderer("App", "inferIntent (refine) failed", { error: String(error) });
-      pushChat("system", `Intent inference failed: ${error instanceof Error ? error.message : "Unknown error"}`);
-    } finally {
-      setIntentInferring(false);
-    }
-  }, [pendingIntentConfirmation, pendingQuestionInput, pushChat]);
 
   const onUrlChanged = (nextUrl: string) => {
     logRenderer("App", "onUrlChanged", { nextUrl });
@@ -693,20 +578,14 @@ export default function App() {
           onPendingQuestionInputChange={setPendingQuestionInput}
           onSubmitPendingQuestion={submitQuestionAnswer}
           onSkipPendingQuestion={cancelQuestion}
-          pendingIntentConfirmation={pendingIntentConfirmation}
-          pendingIntentRefine={pendingIntentRefine}
-          onProceedIntent={onProceedIntent}
-          onRefineIntent={onRefineIntent}
-          onPickIntentChoice={onPickIntentChoice}
-          onSubmitRefine={onSubmitRefine}
-          onCancelRefine={() => setPendingIntentRefine(false)}
-          onDismissIntentConfirmation={onDismissIntentConfirmation}
           intentInferring={intentInferring}
           goal={goal}
           onGoalChange={setGoal}
           onRun={onRunAgent}
           onInterrupt={() => {
-            abortControllerRef.current?.abort();
+            if (runIdRef.current) {
+              window.steadyhands.abortAgent(runIdRef.current);
+            }
             askUserResolveRef.current?.(null);
           }}
           onChoiceExecute={executeChoice}
