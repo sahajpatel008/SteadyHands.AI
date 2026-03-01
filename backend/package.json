@@ -12,9 +12,12 @@
   "type": "commonjs",
   "dependencies": {
     "@browserbasehq/stagehand": "^3.1.0",
+    "@langchain/core": "^1.1.29",
+    "@langchain/openai": "^1.2.11",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
+    "langchain": "^1.2.28",
     "openai": "^4.104.0",
     "twilio": "^5.12.2",
     "zod": "^4.3.6"

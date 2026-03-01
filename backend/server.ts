@@ -8,6 +8,11 @@ import { randomUUID } from 'crypto';
 import OpenAI from 'openai';
 import fs from 'fs';
 import twilio from 'twilio';
+import { ChatOpenAI } from '@langchain/openai';
+import { tool } from '@langchain/core/tools';
+import { createToolCallingAgent, AgentExecutor } from 'langchain/agents';
+import { ChatPromptTemplate, MessagesPlaceholder } from '@langchain/core/prompts';
+import { HumanMessage, AIMessage } from '@langchain/core/messages';
 
 // Load environment variables
 dotenv.config();
@@ -98,14 +103,6 @@ type ExtractedOption = {
   price?: string;
 };
 
-type ReActStep = {
-  thought: string;
-  action_type: 'act' | 'surface_options' | 'ask_human';
-  action_instruction: string | null;
-  options: ExtractedOption[] | null;
-  question: string | null;
-};
-
 // ─── DOM snapshot via Stagehand extract ───
 async function getPageContext(stagehand: Stagehand): Promise<PageContext> {
   return await stagehand.extract(
@@ -114,74 +111,100 @@ async function getPageContext(stagehand: Stagehand): Promise<PageContext> {
   );
 }
 
-// ─── ReAct step: reason over DOM context and decide next action ───
-async function callReActStep(
-  goal: string,
-  history: HistoryEntry[],
-  pageContext: PageContext,
-  stepNum: number
-): Promise<ReActStep> {
-  const openai = createRawClient();
-  const historyText = history.map(h => `${h.role}: ${h.content}`).join('\n') || '(none)';
-  const stepsRemaining = MAX_REACT_STEPS - stepNum;
-
-  const systemPrompt = `You are a DOM-aware browser automation agent. You see the current page state and must decide the single best next action toward the user's goal.
-
-Return ONLY valid JSON — no thinking, no explanation, no markdown:
-{
-  "thought": "one sentence: what you see and why you chose this action",
-  "action_type": "act" | "surface_options" | "ask_human",
-  "action_instruction": "precise Stagehand browser instruction, or null",
-  "options": [{"name": "", "description": "", "url": "", "file_type": "", "rating": "", "price": ""}] or null,
-  "question": "question for the user, or null"
+// ─── LangChain LLM (tool-calling, same AMD endpoint) ───
+function createLangChainLLM() {
+  return new ChatOpenAI({
+    modelName: AMD_LLM_MODEL,
+    temperature: 0.1,
+    configuration: {
+      baseURL: AMD_LLM_BASE_URL,
+      apiKey: process.env.AMD_LLM_API_KEY,
+    },
+  });
 }
 
-Decision rules (strict priority order):
-1. SURFACE_OPTIONS — visible_results on the page are directly relevant to the goal (search results, PDF links, product listings, download buttons). Return them immediately. Do NOT keep navigating when results are already visible.
-2. ACT — there is a clearly useful interactive element (search bar, navigation link, relevant button). Generate ONE precise Stagehand instruction e.g. "Type '1040-SR' into the search bar and press Enter" or "Click the link that says 'Forms & Publications'".
-3. ASK_HUMAN — ONLY if has_login_wall is true, or there are zero relevant interactive elements. NEVER ask just because the goal is vague — try to act first.
+// ─── Build per-request LangChain tools bound to the live Stagehand instance ───
+type FinishPayload = {
+  description: string;
+  is_goal_complete: boolean;
+  options?: ExtractedOption[];
+  question_for_user?: string;
+};
 
-${stepsRemaining === 1 ? 'IMPORTANT: This is your LAST step. You MUST choose surface_options or ask_human — do NOT choose act.' : ''}
+function buildAgentTools(stagehand: Stagehand, onFinish: (payload: FinishPayload) => void) {
+  const observePage = tool(
+    async () => {
+      console.log('🔍 [tool] observe_page called');
+      const ctx = await getPageContext(stagehand);
+      console.log(`📄 [tool] Page: "${ctx.page_title}" | ${ctx.current_url}`);
+      return JSON.stringify(ctx);
+    },
+    {
+      name: 'observe_page',
+      description:
+        'Snapshot the current browser page. Returns title, URL, a short summary, whether it has a search bar / login wall / download links, ' +
+        'up to 15 interactive elements, and visible results. ALWAYS call this first before deciding what action to take.',
+      schema: z.object({}),
+    }
+  );
 
-Field rules:
-- act: set action_instruction, set options=null, set question=null
-- surface_options: set options from visible_results (include url and file_type when available), set action_instruction=null, set question=null
-- ask_human: set question, set action_instruction=null, set options=null`;
+  const browserAct = tool(
+    async ({ instruction }: { instruction: string }) => {
+      console.log(`🤖 [tool] browser_act: "${instruction}"`);
+      await stagehand.act(instruction);
+      console.log('✅ [tool] browser_act complete');
+      return `Action completed: ${instruction}`;
+    },
+    {
+      name: 'browser_act',
+      description:
+        'Execute a single precise browser action (click, type, scroll, navigate). ' +
+        'Example instructions: "Type \'1040-SR\' into the search bar and press Enter", ' +
+        '"Click the link that says \'Forms & Publications\'". ' +
+        'After acting, always call observe_page to see what changed.',
+      schema: z.object({
+        instruction: z.string().describe('The precise browser action to perform'),
+      }),
+    }
+  );
 
-  const userContent = `Goal: ${goal}
+  const finish = tool(
+    async (payload: FinishPayload) => {
+      console.log('🎯 [tool] finish called:', JSON.stringify(payload).slice(0, 120));
+      onFinish(payload);
+      return 'Result captured.';
+    },
+    {
+      name: 'finish',
+      description:
+        'Call this when you have a final answer for the user — either you found relevant options/results, ' +
+        'completed the goal, or need to ask the user something. ' +
+        'ALWAYS end by calling finish.',
+      schema: z.object({
+        description: z.string().describe('A plain-English summary of what happened or was found'),
+        is_goal_complete: z.boolean().describe('True if the user\'s goal is fully achieved'),
+        options: z
+          .array(
+            z.object({
+              name: z.string(),
+              description: z.string().optional(),
+              url: z.string().optional(),
+              file_type: z.string().optional(),
+              rating: z.string().optional(),
+              price: z.string().optional(),
+            })
+          )
+          .optional()
+          .describe('Relevant results, links, or items found on the page'),
+        question_for_user: z
+          .string()
+          .optional()
+          .describe('Set ONLY if you need clarification from the user to continue'),
+      }),
+    }
+  );
 
-Current page:
-- Title: ${pageContext.page_title}
-- URL: ${pageContext.current_url}
-- Summary: ${pageContext.page_summary}
-- has_search_bar: ${pageContext.has_search_bar}
-- has_login_wall: ${pageContext.has_login_wall}
-- has_download_link: ${pageContext.has_download_link}
-- Interactive elements: ${JSON.stringify(pageContext.interactive_elements)}
-- Visible results: ${JSON.stringify(pageContext.visible_results ?? [])}
-
-Conversation so far:
-${historyText}
-
-Step ${stepNum + 1} of ${MAX_REACT_STEPS}. Decide your next action.`;
-
-  const response = await openai.chat.completions.create({
-    model: AMD_LLM_MODEL,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userContent },
-    ],
-    temperature: 0.1,
-  });
-
-  const raw = response.choices[0].message.content ?? '{}';
-  const cleaned = raw.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-  const match = cleaned.match(/\{[\s\S]*\}/);
-  if (!match) {
-    console.error('❌ callReActStep: no JSON found in response:', raw.slice(0, 200));
-    return { thought: 'Parse error', action_type: 'ask_human', action_instruction: null, options: null, question: 'I had trouble reading the page. Could you describe what you see?' };
-  }
-  return JSON.parse(match[0]) as ReActStep;
+  return [observePage, browserAct, finish] as const;
 }
 
 // ─── Twilio: confirm completed goal ───
@@ -337,92 +360,100 @@ app.post('/api/session/act', async (req, res) => {
   console.log(`💬 User: "${userGoal}"`);
 
   try {
-    // ─── ReAct LOOP (up to MAX_REACT_STEPS iterations) ───
+    // ─── LangChain AGENT (tool-calling ReAct via AgentExecutor) ───
+    let finishPayload: FinishPayload | null = null;
+    const tools = buildAgentTools(session.stagehand, (p) => { finishPayload = p; });
+
+    const prompt = ChatPromptTemplate.fromMessages([
+      [
+        'system',
+        `You are Nav-Mate, a DOM-aware browser automation assistant helping elderly users navigate websites.
+
+Your job:
+1. Call observe_page to see the current page state.
+2. Decide: if useful results are already visible, call finish with those results.
+   If a useful action is possible (search bar, button, link), call browser_act with a precise instruction, then observe_page again.
+   If you are blocked (login wall, no relevant elements), call finish with a question_for_user.
+3. ALWAYS end by calling finish. Never leave the user without a response.
+4. Keep actions simple and precise. One action at a time.
+5. Do NOT think out loud. Use tools directly.`,
+      ],
+      new MessagesPlaceholder('chat_history'),
+      ['human', '{input}'],
+      new MessagesPlaceholder('agent_scratchpad'),
+    ]);
+
+    const llm = createLangChainLLM();
+    const agent = await createToolCallingAgent({ llm, tools: tools as any, prompt });
+    const executor = new AgentExecutor({
+      agent,
+      tools: tools as any,
+      maxIterations: MAX_REACT_STEPS,
+      returnIntermediateSteps: true,
+      verbose: false,
+    });
+
+    // Map session history to LangChain message format
+    const chatHistory = session.history
+      .filter(h => !h.content.startsWith('[step '))  // skip intermediate act entries
+      .map(h => h.role === 'user' ? new HumanMessage(h.content) : new AIMessage(h.content));
+
+    console.log(`🧠 Invoking LangChain agent for: "${userGoal}"`);
+    const agentResult = await executor.invoke({
+      input: `Goal: ${session.goal ?? userGoal}\nLatest message: ${userGoal}`,
+      chat_history: chatHistory,
+    });
+
+    // Extract thinking steps from intermediate steps
     type ThinkingStep = { step: number; thought: string; action_type: string; action_instruction: string | null };
-    const thinkingSteps: ThinkingStep[] = [];
+    const thinkingSteps: ThinkingStep[] = (agentResult.intermediateSteps ?? []).map(
+      (s: any, idx: number) => ({
+        step: idx + 1,
+        thought: s.action?.log ?? s.action?.toolInput?.instruction ?? s.action?.tool ?? '',
+        action_type: s.action?.tool === 'finish' ? 'surface_options'
+          : s.action?.tool === 'browser_act' ? 'act'
+          : 'observe',
+        action_instruction: s.action?.tool === 'browser_act'
+          ? (s.action?.toolInput?.instruction ?? null)
+          : null,
+      })
+    );
 
-    for (let stepNum = 0; stepNum < MAX_REACT_STEPS; stepNum++) {
+    console.log(`📊 Agent took ${thinkingSteps.length} steps`);
 
-      // 1. Snapshot the live page via Stagehand extract
-      console.log(`\n🔍 Getting page context [step ${stepNum + 1}/${MAX_REACT_STEPS}]...`);
-      const pageContext = await getPageContext(session.stagehand);
-      console.log(`📄 Page: "${pageContext.page_title}" | ${pageContext.current_url}`);
-      console.log(`📊 search=${pageContext.has_search_bar} login_wall=${pageContext.has_login_wall} download=${pageContext.has_download_link} results=${pageContext.visible_results?.length ?? 0}`);
+    // Update session history with a summary of what happened
+    const agentSummary = finishPayload?.description ?? agentResult.output ?? 'Task attempted.';
+    session.history.push({ role: 'agent', content: agentSummary });
 
-      // 2. Ask the ReAct agent what to do next
-      const step = await callReActStep(session.goal ?? userGoal, session.history, pageContext, stepNum);
-      console.log(`🧠 Thought [${stepNum + 1}]: ${step.thought}`);
-      console.log(`🎬 Decision: ${step.action_type}`);
-
-      // Accumulate for frontend display
-      thinkingSteps.push({
-        step: stepNum + 1,
-        thought: step.thought,
-        action_type: step.action_type,
-        action_instruction: step.action_instruction ?? null,
+    // Build the response from finish payload (or fallback to agent text output)
+    if (finishPayload && finishPayload.question_for_user) {
+      session.history.push({ role: 'agent', content: `[clarification] ${finishPayload.question_for_user}` });
+      return res.json({
+        status: 'needs_clarification',
+        question: finishPayload.question_for_user,
+        thinking_steps: thinkingSteps,
       });
-
-      // 3. Branch on the agent's decision
-
-      if (step.action_type === 'ask_human') {
-        const question = step.question ?? 'Could you give me more context?';
-        session.history.push({ role: 'agent', content: `[clarification] ${question}` });
-        return res.json({ status: 'needs_clarification', question, thinking_steps: thinkingSteps });
-      }
-
-      if (step.action_type === 'surface_options') {
-        const options: ExtractedOption[] = step.options ?? pageContext.visible_results ?? [];
-        const description = `Found ${options.length} result${options.length !== 1 ? 's' : ''} for your goal.`;
-        session.history.push({ role: 'agent', content: description });
-        const isComplete = options.length > 0 && (
-          pageContext.has_download_link ||
-          options.some(o => o.file_type?.toLowerCase().includes('pdf') || !!o.url)
-        );
-        if (isComplete) await triggerConfirmationCall(session.goal ?? description);
-        console.log(`🎯 Surfacing ${options.length} options (is_goal_complete=${isComplete})`);
-        return res.json({
-          status: 'action_complete',
-          description,
-          is_goal_complete: isComplete,
-          extracted_options: options,
-          thinking_steps: thinkingSteps,
-          suggestions: [
-            'Click one of the options above to continue',
-            'Ask me to refine the search',
-            'Ask me to navigate to a different section',
-          ],
-        });
-      }
-
-      // action_type === 'act'
-      const instruction = step.action_instruction ?? '';
-      console.log(`🤖 Acting [${stepNum + 1}]: "${instruction}"`);
-      await session.stagehand.act(instruction);
-      console.log(`✅ Action complete`);
-      session.history.push({ role: 'agent', content: `[step ${stepNum + 1}] ${instruction}` });
-      // continue to next iteration
     }
 
-    // ─── Max steps exhausted — surface final page state ───
-    console.log(`⚠️ Max steps (${MAX_REACT_STEPS}) reached — surfacing current page state`);
-    const finalContext = await getPageContext(session.stagehand);
-    const finalOptions: ExtractedOption[] = finalContext.visible_results ?? [];
-    session.history.push({ role: 'agent', content: `Reached ${MAX_REACT_STEPS} steps. Current page: ${finalContext.page_title}` });
+    const options: ExtractedOption[] = finishPayload?.options ?? [];
+    const isComplete = finishPayload?.is_goal_complete ?? false;
+    if (isComplete) await triggerConfirmationCall(session.goal ?? agentSummary);
+
     return res.json({
       status: 'action_complete',
-      description: `I've taken ${MAX_REACT_STEPS} steps. Here's what I found on "${finalContext.page_title}".`,
-      is_goal_complete: false,
-      extracted_options: finalOptions,
+      description: agentSummary,
+      is_goal_complete: isComplete,
+      extracted_options: options.length > 0 ? options : undefined,
       thinking_steps: thinkingSteps,
       suggestions: [
-        'Tell me to keep going from here',
-        'Describe what you want me to click',
-        'Ask me to search for something specific',
+        options.length > 0 ? 'Click one of the options above to continue' : 'Tell me what to do next',
+        'Ask me to refine or search for something else',
+        'Ask me to navigate to a different section',
       ],
     });
 
   } catch (error) {
-    console.error('❌ Error during ReAct loop:', error);
+    console.error('❌ Error during LangChain agent:', error);
     res.status(500).json({ error: 'Failed to complete the action. Try again or rephrase.' });
   }
 });
