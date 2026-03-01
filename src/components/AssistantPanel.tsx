@@ -382,7 +382,7 @@ export function AssistantPanel({
               }
             }
           }}
-          placeholder="Example: Book a flight from SFO to Mumbai for tomorrow"
+          placeholder="Example: Find the Form 1040-SR (Tax Return for Seniors) and get the PDF download link."
           rows={4}
         />
         <div className="runBtnRow">
